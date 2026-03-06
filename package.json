@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "publisher": "codescrim",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.93.0"
   },
   "categories": [
     "Education",
@@ -157,6 +157,11 @@
           "type": "boolean",
           "default": true,
           "description": "Record microphone audio using the bundled Rust recorder sidecar and save it alongside the .scrim file"
+        },
+        "codescrim.openRecordingTerminal": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open a dedicated CodeScrim terminal at recording start so terminal commands have a capturable shell session"
         }
       }
     },
@@ -181,7 +186,7 @@
     "package": "vsce package --no-dependencies"
   },
   "devDependencies": {
-    "@types/vscode": "^1.85.0",
+    "@types/vscode": "^1.93.0",
     "@types/node": "^20.0.0",
     "typescript": "^5.3.0",
     "@vscode/vsce": "^2.22.0"

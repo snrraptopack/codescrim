@@ -9,6 +9,13 @@ interface PtySession {
   cumulativeData: string;
 }
 
+interface TerminalReplayState {
+  name: string;
+  cumulativeData: string;
+  isOpen: boolean;
+  openOrder: number;
+}
+
 /**
  * Replays recorded terminal events by creating read-only Pseudo-Terminals.
  *
@@ -29,27 +36,47 @@ export class TerminalPlayer implements vscode.Disposable {
   syncToTime(events: TerminalEvent[], time: number): void {
     this.disposeAllSessions();
 
-    // Re-create each terminal that was open at or before `time`
-    const opens = events.filter(
-      (e) => e.type === 'terminalOpen' && e.timestamp <= time,
-    ) as Extract<TerminalEvent, { type: 'terminalOpen' }>[];
+    const states = new Map<number, TerminalReplayState>();
+    let openOrder = 0;
 
-    for (const open of opens) {
-      const session = this.createSession(open.terminalId, open.name);
+    for (const event of events) {
+      if (event.timestamp > time) {
+        break;
+      }
 
-      // Replay all output for this terminal up to `time`
-      const dataEvents = events.filter(
-        (e) =>
-          e.type === 'terminal' &&
-          (e as Extract<TerminalEvent, { type: 'terminal' }>).terminalId ===
-            open.terminalId &&
-          e.timestamp <= time,
-      ) as Extract<TerminalEvent, { type: 'terminal' }>[];
+      if (event.type === 'terminalOpen') {
+        states.set(event.terminalId, {
+          name: event.name,
+          cumulativeData: '',
+          isOpen: true,
+          openOrder: openOrder++,
+        });
+        continue;
+      }
 
-      const combined = dataEvents.map((e) => e.data).join('');
-      if (combined) {
-        session.writeEmitter.fire(combined);
-        session.cumulativeData = combined;
+      if (event.type === 'terminal') {
+        const state = states.get(event.terminalId);
+        if (state?.isOpen) {
+          state.cumulativeData += event.data;
+        }
+        continue;
+      }
+
+      const state = states.get(event.terminalId);
+      if (state) {
+        state.isOpen = false;
+      }
+    }
+
+    const openStates = [...states.entries()]
+      .filter(([, state]) => state.isOpen)
+      .sort((a, b) => a[1].openOrder - b[1].openOrder);
+
+    for (const [terminalId, state] of openStates) {
+      const session = this.createSession(terminalId, state.name);
+      if (state.cumulativeData) {
+        session.writeEmitter.fire(state.cumulativeData);
+        session.cumulativeData = state.cumulativeData;
       }
     }
   }
@@ -97,7 +124,7 @@ export class TerminalPlayer implements vscode.Disposable {
       onDidClose: closeEmitter.event,
       open: () => {
         writeEmitter.fire(
-          '\x1b[90m[CodeScrim] Terminal replay — read-only\x1b[0m\r\n',
+          '\x1b[90m[CodeScrim] Tutorial terminal replay — read-only\x1b[0m\r\n',
         );
       },
       close: () => {
@@ -106,9 +133,11 @@ export class TerminalPlayer implements vscode.Disposable {
     };
 
     const terminal = vscode.window.createTerminal({
-      name: `▶ ${name}`,
+      name: `CodeScrim ▶ ${name}`,
+      location: vscode.TerminalLocation.Panel,
       pty,
     });
+    terminal.show(true);
 
     const session: PtySession = {
       writeEmitter,

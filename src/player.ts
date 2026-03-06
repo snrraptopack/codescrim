@@ -301,6 +301,7 @@ export class Player implements vscode.Disposable {
   private async advanceToTime(time: number): Promise<void> {
     if (!this.state || !this.tempDir) { return; }
     const { scrim } = this.state;
+    const previousIndex = this.state.currentEventIndex;
 
     const newIndex = await this.vfs.advanceToTime(
       scrim.events,
@@ -314,11 +315,9 @@ export class Player implements vscode.Disposable {
     );
     this.state.currentEventIndex = newIndex;
 
-    // Incrementally apply any terminal events in the same range
-    const from = this.state.currentEventIndex;
-    for (let i = Math.max(0, from); i < scrim.events.length; i++) {
+    // Incrementally apply terminal events from the newly advanced range.
+    for (let i = Math.max(0, previousIndex + 1); i <= newIndex && i < scrim.events.length; i++) {
       const ev = scrim.events[i];
-      if (ev.timestamp > time) { break; }
       if (isTerminalEvent(ev)) { this.terms.applyEvent(ev as TerminalEvent); }
     }
   }

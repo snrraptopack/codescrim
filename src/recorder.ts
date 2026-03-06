@@ -60,6 +60,7 @@ export class Recorder implements vscode.Disposable {
   private audioRecorder = new AudioRecorder();
   private audioLevel = 0;
   private hasAudio = false;
+  private recordingTerminal: vscode.Terminal | undefined;
 
   // ── ui ───────────────────────────────────────────────────────────────────
   private statusBar: vscode.StatusBarItem;
@@ -213,10 +214,9 @@ export class Recorder implements vscode.Disposable {
     console.log(`[CodeScrim] setup captured — ${this._events.length} events, files: ${Object.keys(this._lastContent).join(', ')}`);
 
     // ── terminal recorder ──────────────────────────────────────────────────
-    this.terminalRecorder.start(() => this.ts());
-    if (!TerminalRecorder.isSupported) {
-      console.log('[CodeScrim] terminal capture requires VS Code 1.87+ — skipping.');
-    }
+    this.terminalRecorder.start(() => this.ts(), message => this.log.appendLine(message));
+    this.log.appendLine('[terminal] capture enabled via shell integration');
+    this.ensureRecordingTerminal();
 
     // ── status-bar timer ───────────────────────────────────────────────────
     this.updateBar();
@@ -283,6 +283,7 @@ export class Recorder implements vscode.Disposable {
 
     // ── merge + sort events ────────────────────────────────────────────────
     const termEvents = this.terminalRecorder.stop();
+    const terminalStats = this.terminalRecorder.getStats(termEvents);
     const allEvents = [...this._events, ...termEvents].sort((a, b) => a.timestamp - b.timestamp);
 
     let savedAudioFileName = '';
@@ -318,13 +319,25 @@ export class Recorder implements vscode.Disposable {
     for (const ev of allEvents) {
       if (ev.type in counts) { (counts as any)[ev.type]++; } else { counts.other++; }
     }
-    this.log.appendLine(`[stop] saved=${saveUri.fsPath} total=${allEvents.length} setup=${counts.setup} edit=${counts.edit} snap=${counts.snapshot} sel=${counts.selection} open=${counts.openFile}`);
-    console.log('[CodeScrim] saved', saveUri.fsPath, counts);
+    this.log.appendLine(
+      `[stop] saved=${saveUri.fsPath} total=${allEvents.length} setup=${counts.setup} edit=${counts.edit} snap=${counts.snapshot} sel=${counts.selection} open=${counts.openFile} termOpen=${terminalStats.opens} termData=${terminalStats.data} termClose=${terminalStats.closes} termChars=${terminalStats.bytes}`,
+    );
+    console.log('[CodeScrim] saved', saveUri.fsPath, counts, terminalStats);
 
     const msg =
       `✅ Saved "${title}" — ${allEvents.length} events ` +
       `(setup:${counts.setup} snap:${counts.snapshot} sel:${counts.selection} open:${counts.openFile}) ` +
+      `(term open:${terminalStats.opens} data:${terminalStats.data} close:${terminalStats.closes}) ` +
       `${counts.chapter} chapters.`;
+
+    if (terminalStats.opens > 0 && terminalStats.data === 0) {
+      this.log.appendLine(
+        '[terminal] warning: terminals opened during recording but no terminal output was captured. Prefer the dedicated CodeScrim recording terminal and a shell with VS Code shell integration enabled.',
+      );
+      vscode.window.showWarningMessage(
+        'CodeScrim saved the tutorial, but no terminal output was captured. Use the dedicated CodeScrim recording terminal for terminal steps.',
+      );
+    }
 
     const choice = await vscode.window.showInformationMessage(msg, 'Play Tutorial', 'Open File');
     if (choice === 'Play Tutorial') {
@@ -525,6 +538,27 @@ export class Recorder implements vscode.Disposable {
     this.recordingBadge.color = new vscode.ThemeColor('statusBarItem.errorForeground');
     this.recordingBadge.tooltip = 'CodeScrim recording in progress. Click to stop recording.';
     this.recordingBadge.show();
+  }
+
+  private ensureRecordingTerminal(): void {
+    const shouldOpen = vscode.workspace
+      .getConfiguration('codescrim')
+      .get<boolean>('openRecordingTerminal', true);
+
+    if (!shouldOpen) {
+      return;
+    }
+
+    // Create a normal interactive terminal — shell integration captures I/O
+    this.recordingTerminal = this.terminalRecorder.createRecordingTerminal('Recording');
+
+    this.log.appendLine(
+      `[terminal] recording proxy terminal ready name="${this.recordingTerminal.name}"`,
+    );
+    vscode.window.setStatusBarMessage(
+      '$(terminal) Use the CodeScrim Recording Terminal for commands you want recorded.',
+      6000,
+    );
   }
 
   dispose(): void {
