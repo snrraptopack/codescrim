@@ -102,30 +102,51 @@ export class Player implements vscode.Disposable {
     // Open the primary file in the editor
     await this.ensureEditorFocus();
 
-    // Create (or reuse) the webview panel
-    if (this.panel) {
-      this.panel.webview.html = buildPlayerHtml(scrim);
-      this.panel.reveal(vscode.ViewColumn.Beside);
-    } else {
-      this.panel = vscode.window.createWebviewPanel(
-        'codescrim.player',
-        ` ${scrim.title}`,
-        { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
-        {
-          enableScripts: true,
-          retainContextWhenHidden: true,
-          localResourceRoots: [
-            vscode.Uri.file(this.tempDir),
-            this.context.extensionUri,
-          ],
-        },
-      );
-      this.panel.onDidDispose(() => { this.panel = undefined; this.cleanup(); });
-      this.panel.webview.onDidReceiveMessage((msg: WebviewMessage) =>
-        this.queue.enqueue(msg, (m) => this.processMessage(m)),
-      );
-      this.panel.webview.html = buildPlayerHtml(scrim);
+    const mediaPath = this.getLocalMediaPath(scrim);
+    const localResourceRoots = [
+      vscode.Uri.file(this.tempDir),
+      this.context.extensionUri,
+    ];
+
+    if (mediaPath) {
+      localResourceRoots.push(vscode.Uri.file(path.dirname(mediaPath)));
     }
+
+    // Create a fresh panel so localResourceRoots matches the current media file.
+    this.panel?.dispose();
+    this.panel = vscode.window.createWebviewPanel(
+      'codescrim.player',
+      ` ${scrim.title}`,
+      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots,
+      },
+    );
+    this.panel.onDidDispose(() => { this.panel = undefined; this.cleanup(); });
+    this.panel.webview.onDidReceiveMessage((msg: WebviewMessage) =>
+      this.queue.enqueue(msg, (m) => this.processMessage(m)),
+    );
+
+    const mediaUrl = mediaPath
+      ? this.panel.webview.asWebviewUri(vscode.Uri.file(mediaPath)).toString()
+      : undefined;
+
+    this.panel.webview.html = buildPlayerHtml(scrim, mediaUrl, this.panel.webview.cspSource);
+  }
+
+  private getLocalMediaPath(scrim: ScrimFile): string | undefined {
+    const mediaPath = scrim.audioUrl?.trim() || scrim.videoUrl?.trim();
+    if (!mediaPath) {
+      return undefined;
+    }
+
+    if (mediaPath.startsWith('http://') || mediaPath.startsWith('https://')) {
+      return undefined;
+    }
+
+    return mediaPath;
   }
 
   //  message processing 

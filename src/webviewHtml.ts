@@ -1,14 +1,15 @@
 import { ScrimFile } from './types';
 import { escapeHtml, formatTime } from './utils';
 
-export function buildPlayerHtml(scrim: ScrimFile): string {
+export function buildPlayerHtml(scrim: ScrimFile, mediaUrl?: string, cspSource?: string): string {
     const chapters = scrim.events
         .map((s, i) => (s.type === 'chapter' ? { title: s.title, timestamp: s.timestamp, index: i } : null))
         .filter((c): c is NonNullable<typeof c> => c !== null);
 
-    const videoBlock = buildVideoBlock(scrim);
+    const videoBlock = buildVideoBlock(scrim, mediaUrl);
     const chaptersHtml = buildChaptersHtml(chapters);
     const totalEvents = scrim.events.length;
+    const safeCspSource = cspSource ?? '';
 
     return /* html */`<!DOCTYPE html>
 <html lang="en">
@@ -16,11 +17,11 @@ export function buildPlayerHtml(scrim: ScrimFile): string {
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="
   default-src 'none';
-  script-src 'unsafe-inline' https://www.youtube.com https://www.youtube-nocookie.com;
+  script-src 'unsafe-inline' ${safeCspSource} https://www.youtube.com https://www.youtube-nocookie.com;
   frame-src https://www.youtube.com https://www.youtube-nocookie.com https://player.vimeo.com;
-  style-src 'unsafe-inline';
-  media-src * blob: data:;
-  img-src https: data:;
+  style-src 'unsafe-inline' ${safeCspSource};
+  media-src ${safeCspSource} https: data: blob:;
+  img-src ${safeCspSource} https: data:;
 ">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CodeScrim</title>
@@ -79,6 +80,51 @@ body{
   display: flex;
   flex-direction: column;
   align-items: center;
+}
+.transport{
+  width:100%;
+  max-width:640px;
+  display:flex;
+  align-items:center;
+  gap:12px;
+}
+.transport-btn{
+  appearance:none;
+  border:none;
+  background:transparent;
+  color:var(--accent);
+  font-size:20px;
+  cursor:pointer;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  width:32px;
+  height:32px;
+  border-radius:50%;
+}
+.transport-time{
+  font-family:monospace;
+  font-size:13px;
+  color:var(--muted);
+  min-width:92px;
+  text-align:center;
+  font-variant-numeric:tabular-nums;
+}
+.transport-slider{
+  flex:1;
+  cursor:pointer;
+}
+.transport-note{
+  margin-top:8px;
+  color:var(--muted);
+  font-size:11px;
+  align-self:center;
+}
+.transport-error{
+  margin-top:8px;
+  color:#ff8f8f;
+  font-size:11px;
+  align-self:center;
 }
 
 /* ── edit banner ─────────────────────────────────────────────── */
@@ -212,6 +258,7 @@ let syncInterval = null;
 let ytPlayer     = null;
 let currentEventIndex = 0;
 const totalEvents = ${totalEvents};
+let lastLocalSyncSentAt = -1;
 
 // Notify extension that the webview DOM + JS is ready
 vscode.postMessage({ type: 'ready' });
@@ -240,17 +287,62 @@ function onYtStateChange(ev) {
 window.addEventListener('load', () => {
   const vid = document.getElementById('localVideo');
   if (!vid) return;
+  const playBtn = document.getElementById('localPlayBtn');
+  const transport = document.getElementById('localTransport');
   vid.addEventListener('play',       () => onVideoPlay(vid.currentTime));
   vid.addEventListener('pause',      () => onVideoPause(vid.currentTime));
   vid.addEventListener('ended',      onVideoEnd);
-  vid.addEventListener('timeupdate', () => {
-    if (!isEditMode) sendTime(vid.currentTime);
+  const refreshDuration = () => {
+    const duration = Number.isFinite(vid.duration) ? vid.duration : 0;
+    updateLocalTransport(vid.currentTime, duration);
+    setStatus('idle', 'Ready — press ▶ to start');
+  };
+  vid.addEventListener('loadedmetadata', refreshDuration);
+  vid.addEventListener('durationchange', refreshDuration);
+  vid.addEventListener('canplay', refreshDuration);
+  vid.addEventListener('seeking', () => {
+    updateLocalTransport(vid.currentTime, vid.duration);
   });
-  setStatus('idle', 'Ready — press ▶ to start');
+  vid.addEventListener('error', () => {
+    const err = document.getElementById('localMediaError');
+    if (err) err.textContent = 'Media failed to load in the webview.';
+    setStatus('idle', 'Replay media failed to load');
+  });
+  vid.addEventListener('timeupdate', () => {
+    updateLocalTransport(vid.currentTime, vid.duration);
+  });
+  if (playBtn) {
+    playBtn.addEventListener('click', () => {
+      if (vid.paused) {
+        void vid.play();
+      } else {
+        vid.pause();
+      }
+    });
+  }
+  if (transport) {
+    transport.addEventListener('dblclick', (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) {
+        return;
+      }
+      if (target.id === 'localScrubber' || target.id === 'localPlayBtn') {
+        return;
+      }
+      if (!vid.paused) {
+        vid.pause();
+      }
+    });
+  }
+  vid.load();
+  setTimeout(refreshDuration, 0);
 });
 
 // ── video event handlers ─────────────────────────────────────────────────────
 function onVideoPlay(t) {
+  const playBtn = document.getElementById('localPlayBtn');
+  if (playBtn) playBtn.textContent = '⏸';
+  lastLocalSyncSentAt = -1;
   setStatus('playing', 'Playing…');
   vscode.postMessage({ type: 'played', time: t });
   startSyncLoop();
@@ -258,6 +350,8 @@ function onVideoPlay(t) {
 }
 
 function onVideoPause(t) {
+  const playBtn = document.getElementById('localPlayBtn');
+  if (playBtn) playBtn.textContent = '▶';
   setStatus('paused', 'Paused — edit mode active');
   vscode.postMessage({ type: 'paused', time: t });
   stopSyncLoop();
@@ -265,6 +359,11 @@ function onVideoPause(t) {
 }
 
 function onVideoEnd() {
+  const playBtn = document.getElementById('localPlayBtn');
+  const vid = document.getElementById('localVideo');
+  if (playBtn) playBtn.textContent = '▶';
+  if (vid) vid.currentTime = 0;
+  updateLocalTransport(0, vid ? vid.duration : 0);
   setStatus('idle', 'Tutorial complete 🏁');
   vscode.postMessage({ type: 'ended' });
   stopSyncLoop();
@@ -304,8 +403,14 @@ function startSyncLoop() {
   } else {
     // Native audio/video logic
     syncInterval = setInterval(() => {
-      if (vid) sendTime(vid.currentTime);
-    }, 100);
+      if (vid) {
+        updateLocalTransport(vid.currentTime, vid.duration);
+        if (!isEditMode && (lastLocalSyncSentAt < 0 || Math.abs(vid.currentTime - lastLocalSyncSentAt) >= 0.2)) {
+          lastLocalSyncSentAt = vid.currentTime;
+          sendTime(vid.currentTime);
+        }
+      }
+    }, 150);
   }
 }
 
@@ -387,6 +492,39 @@ window.onCustomScrubDrop = function(val) {
   vscode.postMessage({ type: 'chapterClick', timestamp: t });
 };
 
+window.onLocalScrubInput = function(val) {
+  const vid = document.getElementById('localVideo');
+  const t = parseFloat(val);
+  const duration = vid && Number.isFinite(vid.duration) ? vid.duration : 0;
+  updateLocalTransport(t, duration);
+};
+
+window.onLocalScrubDrop = function(val) {
+  const vid = document.getElementById('localVideo');
+  if (!vid) return;
+  const t = parseFloat(val);
+  vid.currentTime = t;
+  lastLocalSyncSentAt = t;
+  updateLocalTransport(t, vid.duration);
+  sendTime(t);
+};
+
+function updateLocalTransport(currentTime, duration) {
+  const scrubber = document.getElementById('localScrubber');
+  const timeDisplay = document.getElementById('localTimeDisplay');
+  const safeCurrentTime = Number.isFinite(currentTime) ? currentTime : 0;
+  const safeDuration = Number.isFinite(duration) ? duration : 0;
+
+  if (scrubber) {
+    scrubber.max = String(safeDuration);
+    scrubber.value = String(Math.min(safeCurrentTime, safeDuration || safeCurrentTime));
+  }
+
+  if (timeDisplay) {
+    timeDisplay.textContent = formatTime(safeCurrentTime) + ' / ' + formatTime(safeDuration);
+  }
+}
+
 function setStatus(state, text) {
   const dot  = document.getElementById('statusDot');
   const span = document.getElementById('statusText');
@@ -450,8 +588,8 @@ window.addEventListener('message', ev => {
 
 // ── HTML sub-builders ──────────────────────────────────────────────────────
 
-function buildVideoBlock(scrim: ScrimFile): string {
-    const url = scrim.audioUrl?.trim() || scrim.videoUrl?.trim();
+function buildVideoBlock(scrim: ScrimFile, mediaUrl?: string): string {
+  const url = mediaUrl || scrim.audioUrl?.trim() || scrim.videoUrl?.trim();
 
     if (!url) {
         // Find duration of the scrim
@@ -471,11 +609,17 @@ function buildVideoBlock(scrim: ScrimFile): string {
     `;
     }
 
-    // Native HTML5 Audio
-    return `<div style="display:flex; flex-direction:column; align-items:center; padding: 20px;">
-    <audio id="localVideo" controls preload="metadata" style="width: 100%; max-width: 600px; outline: none;">
+    return `<div style="display:flex; flex-direction:column; align-items:center; width:100%; padding:20px;">
+    <audio id="localVideo" preload="metadata" style="display:none;">
       <source src="${escapeHtml(url)}">
     </audio>
+    <div id="localTransport" class="transport">
+      <button id="localPlayBtn" class="transport-btn" type="button">▶</button>
+      <span id="localTimeDisplay" class="transport-time">0:00 / 0:00</span>
+      <input id="localScrubber" class="transport-slider" type="range" min="0" max="0" step="0.1" value="0" oninput="onLocalScrubInput(this.value)" onchange="onLocalScrubDrop(this.value)">
+    </div>
+    <p class="transport-note">Attached replay audio loaded through the VS Code player.</p>
+    <p id="localMediaError" class="transport-error"></p>
   </div>`;
 }
 

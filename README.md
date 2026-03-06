@@ -28,10 +28,16 @@ npm install
 # 3. Compile TypeScript → JavaScript
 npm run compile
 
-# 4. (Option A) Run in development
+4. Build the Rust microphone sidecar
+
+```bash
+npm run build:native
+```
+
+5. (Option A) Run in development
 #    Press F5 in VSCode — opens an Extension Development Host window
 
-# 5. (Option B) Package as a .vsix for distribution
+# 6. (Option B) Package as a .vsix for distribution
 npx vsce package --no-dependencies
 # Then: Extensions panel → ⋯ → Install from VSIX
 ```
@@ -43,12 +49,12 @@ npx vsce package --no-dependencies
 1. Open your project in VSCode.
 2. **Command Palette** (`Ctrl/Cmd+Shift+P`) → `CodeScrim: Start Recording Tutorial`
 3. Enter a title.
-4. **Start your screen recorder** (OBS, QuickTime, etc.) at the same time.
-5. Code normally — snapshots are taken automatically (every 2 s by default).
-6. Use `CodeScrim: Add Chapter Marker` to name key moments.
-7. When done: `CodeScrim: Stop Recording & Save`
-8. Paste your **video URL** (YouTube, Vimeo, or a direct `.mp4` path/URL).
-9. Choose a save location → your `.scrim` file is ready.
+4. Make sure the Rust recorder sidecar has been built once with `npm run build:native`.
+5. **Start your screen recorder** (OBS, QuickTime, etc.) at the same time.
+6. Code normally — snapshots are taken automatically (every 2 s by default).
+7. Use `CodeScrim: Add Chapter Marker` to name key moments.
+8. When done: `CodeScrim: Stop Recording & Save`
+9. Choose a save location → your `.scrim` file and a sibling audio file are written.
 
 ---
 

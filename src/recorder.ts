@@ -7,6 +7,7 @@ import { shouldIgnorePath } from './utils';
 import { TerminalRecorder } from './terminalRecorder';
 import { scanWorkspaceSnapshot } from './workspaceSnapshot';
 import { WorkspaceStructureRecorder } from './workspaceStructureRecorder';
+import { AudioRecorder } from './audioRecorder';
 
 /* ─────────────────────────────────────────────────────────────────────────────
  *  Path helpers — kept dead-simple to avoid cross-case bugs on Windows
@@ -56,9 +57,13 @@ export class Recorder implements vscode.Disposable {
   // ── sub-modules ──────────────────────────────────────────────────────────
   private terminalRecorder = new TerminalRecorder();
   private structureRecorder = new WorkspaceStructureRecorder();
+  private audioRecorder = new AudioRecorder();
+  private audioLevel = 0;
+  private hasAudio = false;
 
   // ── ui ───────────────────────────────────────────────────────────────────
   private statusBar: vscode.StatusBarItem;
+  private recordingBadge: vscode.StatusBarItem;
   private clockTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(context: vscode.ExtensionContext) {
@@ -69,8 +74,14 @@ export class Recorder implements vscode.Disposable {
     );
     this.statusBar.name = 'CodeScrim Recording Timer';
     this.statusBar.command = 'codescrim.stopRecording';
+    this.recordingBadge = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Left, 1000,
+    );
+    this.recordingBadge.name = 'CodeScrim Recording Badge';
+    this.recordingBadge.command = 'codescrim.stopRecording';
     context.subscriptions.push(
       this.statusBar,
+      this.recordingBadge,
       this.log,
       this.structureRecorder,
       vscode.workspace.onDidChangeTextDocument(e => this.handleDocChange(e)),
@@ -99,11 +110,82 @@ export class Recorder implements vscode.Disposable {
     });
     if (title === undefined) { return; }
 
-    // Mark recording BEFORE any other async work
-    this._recording = true;
+    let shouldRecordAudio = false;
+    const recordAudioByDefault = vscode.workspace
+      .getConfiguration('codescrim')
+      .get<boolean>('recordAudio', true);
+
+    if (recordAudioByDefault) {
+      const micChoice = await vscode.window.showQuickPick(
+        [
+          { label: '$(mic) Yes, record microphone', value: 'yes' },
+          { label: '$(mute) No, record code only', value: 'no' },
+        ],
+        {
+          title: 'CodeScrim — Microphone Recording',
+          placeHolder: 'Choose whether to attach microphone audio to this tutorial',
+          ignoreFocusOut: true,
+        },
+      );
+
+      if (!micChoice) {
+        return;
+      }
+
+      shouldRecordAudio = micChoice.value === 'yes';
+    }
+
     this._events = [];
     this._lastContent = {};
     this._knownDirectories = new Set<string>();
+    this.audioLevel = 0;
+    this.hasAudio = false;
+
+    if (shouldRecordAudio) {
+      this.statusBar.text = '$(loading~spin) CodeScrim: starting recorder…';
+      this.statusBar.tooltip = 'CodeScrim is waiting for the Rust recorder sidecar to start.';
+      this.statusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+      this.statusBar.color = new vscode.ThemeColor('statusBarItem.warningForeground');
+      this.statusBar.show();
+
+      while (true) {
+        const audioStarted = await this.audioRecorder.start((level: number) => {
+          this.audioLevel = level;
+          if (this._recording) {
+            this.updateBar();
+          }
+        });
+
+        if (audioStarted) {
+          this.hasAudio = true;
+          vscode.window.setStatusBarMessage('$(mic) CodeScrim recorder sidecar is ON', 5000);
+          break;
+        }
+
+        const choice = await vscode.window.showWarningMessage(
+          `CodeScrim: Recorder sidecar did not start. ${this.audioRecorder.lastError || 'Check your microphone device and native recorder build.'}`,
+          'Retry Microphone',
+          'Continue Without Audio',
+          'Cancel Recording',
+        );
+
+        if (choice === 'Retry Microphone') {
+          continue;
+        }
+
+        this.statusBar.hide();
+        if (choice === 'Continue Without Audio') {
+          shouldRecordAudio = false;
+          break;
+        }
+
+        return;
+      }
+    } else {
+      vscode.window.setStatusBarMessage('$(mute) CodeScrim recording code only (no microphone)', 4000);
+    }
+
+    this._recording = true;
     await this.context.workspaceState.update('codescrim.title', title.trim());
     vscode.commands.executeCommand('setContext', 'codescrim.isRecording', true);
 
@@ -145,7 +227,9 @@ export class Recorder implements vscode.Disposable {
 
     vscode.window
       .showInformationMessage(
-        `🎬 Recording "${title.trim()}" — code is being captured.`,
+        this.hasAudio
+          ? `🎬 Recording "${title.trim()}" — code + microphone audio are being captured.`
+          : `🎬 Recording "${title.trim()}" — code is being captured (no microphone).`,
         'Add Chapter Marker', 'Stop Recording',
       )
       .then(choice => {
@@ -174,6 +258,10 @@ export class Recorder implements vscode.Disposable {
     if (this.clockTimer) { clearInterval(this.clockTimer); this.clockTimer = undefined; }
     this.structureRecorder.stop();
 
+    const audioBuffer = this.hasAudio ? await this.audioRecorder.stop() : null;
+    this.hasAudio = false;
+    this.audioLevel = 0;
+
     const title = this.context.workspaceState.get<string>('codescrim.title') ?? 'untitled';
     this.statusBar.text = '$(check) CodeScrim: Saving…';
 
@@ -186,22 +274,42 @@ export class Recorder implements vscode.Disposable {
       title: 'Save Tutorial',
     });
 
-    if (!saveUri) { this.statusBar.hide(); return; }
+    if (!saveUri) {
+      this.terminalRecorder.stop();
+      this.statusBar.hide();
+      this.recordingBadge.hide();
+      return;
+    }
 
     // ── merge + sort events ────────────────────────────────────────────────
     const termEvents = this.terminalRecorder.stop();
     const allEvents = [...this._events, ...termEvents].sort((a, b) => a.timestamp - b.timestamp);
 
+    let savedAudioFileName = '';
+    if (audioBuffer && audioBuffer.length > 0) {
+      const ext = '.wav';
+      const base = path.basename(saveUri.fsPath, path.extname(saveUri.fsPath));
+      savedAudioFileName = `${base}${ext}`;
+      const audioPath = path.join(path.dirname(saveUri.fsPath), savedAudioFileName);
+      fs.writeFileSync(audioPath, audioBuffer);
+      this.log.appendLine(`[audio] saved=${audioPath} bytes=${audioBuffer.length}`);
+    } else {
+      this.log.appendLine('[audio] no audio track captured');
+    }
+
     // ── write .scrim ───────────────────────────────────────────────────────
     const scrim: ScrimFile = {
       version: '1.0',
       title,
-      audioUrl: '',
       events: allEvents,
       createdAt: new Date().toISOString(),
     };
+    if (savedAudioFileName) {
+      scrim.audioUrl = savedAudioFileName;
+    }
     fs.writeFileSync(saveUri.fsPath, JSON.stringify(scrim, null, 2), 'utf8');
     this.statusBar.hide();
+    this.recordingBadge.hide();
 
     // ── summary ────────────────────────────────────────────────────────────
     const counts = {
@@ -398,18 +506,34 @@ export class Recorder implements vscode.Disposable {
     const elapsed = this.ts();
     const m = Math.floor(elapsed / 60).toString().padStart(2, '0');
     const s = Math.floor(elapsed % 60).toString().padStart(2, '0');
+    const audioPct = Math.round(this.audioLevel * 100);
+    const audioTag = this.audioRecorder.isRecording
+      ? `  ·  $(mic) ${audioPct}%`
+      : '  ·  $(unmute) off';
     this.statusBar.text =
-      `$(primitive-dot) REC ${m}:${s}  ·  ${this._events.length}`;
+      `$(primitive-dot) REC ${m}:${s}  ·  ${this._events.length}${audioTag}`;
     this.statusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
     this.statusBar.color = new vscode.ThemeColor('statusBarItem.errorForeground');
-    this.statusBar.tooltip = 'CodeScrim is recording. Click to stop and save.';
+    this.statusBar.tooltip = this.audioRecorder.isRecording
+      ? 'CodeScrim is recording code and microphone audio. Click to stop and save.'
+      : 'CodeScrim is recording code only. Click to stop and save.';
+
+    const blink = Math.floor(elapsed) % 2 === 0 ? '$(primitive-dot)' : '$(record)';
+    const micState = this.audioRecorder.isRecording ? 'MIC ON' : 'MIC OFF';
+    this.recordingBadge.text = `${blink} REC  ${micState}`;
+    this.recordingBadge.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+    this.recordingBadge.color = new vscode.ThemeColor('statusBarItem.errorForeground');
+    this.recordingBadge.tooltip = 'CodeScrim recording in progress. Click to stop recording.';
+    this.recordingBadge.show();
   }
 
   dispose(): void {
     if (this.clockTimer) { clearInterval(this.clockTimer); }
+    this.audioRecorder.dispose();
     this.terminalRecorder.dispose();
     this.structureRecorder.dispose();
     this.statusBar.dispose();
+    this.recordingBadge.dispose();
   }
 
   private rememberParentDirectories(relativePath: string): void {
