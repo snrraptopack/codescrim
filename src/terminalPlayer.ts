@@ -1,10 +1,14 @@
 import * as vscode from 'vscode';
 import { TerminalEvent } from './types';
 
+const REPLAY_BANNER =
+  '\x1b[90m[CodeScrim] Tutorial terminal replay — read-only\x1b[0m\r\n';
+
 interface PtySession {
   writeEmitter: vscode.EventEmitter<string>;
   closeEmitter: vscode.EventEmitter<number | void>;
   terminal: vscode.Terminal;
+  name: string;
   /** Concatenation of all data written so far — used to replay to a seek point */
   cumulativeData: string;
 }
@@ -30,12 +34,10 @@ export class TerminalPlayer implements vscode.Disposable {
 
   /**
    * Rebuild all terminal state from scratch for a seek/scrub to `time`.
-   * Closes every existing PTY session first, then recreates them with the
-   * cumulative output up to `time`.
+   * Reconciles the active PTY sessions and redraws their contents to match
+   * the cumulative output up to `time`.
    */
   syncToTime(events: TerminalEvent[], time: number): void {
-    this.disposeAllSessions();
-
     const states = new Map<number, TerminalReplayState>();
     let openOrder = 0;
 
@@ -72,12 +74,17 @@ export class TerminalPlayer implements vscode.Disposable {
       .filter(([, state]) => state.isOpen)
       .sort((a, b) => a[1].openOrder - b[1].openOrder);
 
-    for (const [terminalId, state] of openStates) {
-      const session = this.createSession(terminalId, state.name);
-      if (state.cumulativeData) {
-        session.writeEmitter.fire(state.cumulativeData);
-        session.cumulativeData = state.cumulativeData;
+    const openIds = new Set(openStates.map(([terminalId]) => terminalId));
+
+    for (const [terminalId] of this.sessions) {
+      if (!openIds.has(terminalId)) {
+        this.disposeSession(terminalId);
       }
+    }
+
+    for (const [terminalId, state] of openStates) {
+      const session = this.sessions.get(terminalId) ?? this.createSession(terminalId, state.name);
+      this.renderSession(session, state.cumulativeData);
     }
   }
 
@@ -97,11 +104,7 @@ export class TerminalPlayer implements vscode.Disposable {
         session.cumulativeData += ev.data;
       }
     } else if (ev.type === 'terminalClose') {
-      const session = this.sessions.get(ev.terminalId);
-      if (session) {
-        session.closeEmitter.fire();
-        this.sessions.delete(ev.terminalId);
-      }
+      this.disposeSession(ev.terminalId);
     }
   }
 
@@ -122,11 +125,7 @@ export class TerminalPlayer implements vscode.Disposable {
     const pty: vscode.Pseudoterminal = {
       onDidWrite: writeEmitter.event,
       onDidClose: closeEmitter.event,
-      open: () => {
-        writeEmitter.fire(
-          '\x1b[90m[CodeScrim] Tutorial terminal replay — read-only\x1b[0m\r\n',
-        );
-      },
+      open: () => {},
       close: () => {
         this.sessions.delete(id);
       },
@@ -143,22 +142,44 @@ export class TerminalPlayer implements vscode.Disposable {
       writeEmitter,
       closeEmitter,
       terminal,
+      name,
       cumulativeData: '',
     };
     this.sessions.set(id, session);
+    this.renderSession(session, '');
     return session;
   }
 
-  private disposeAllSessions(): void {
-    for (const session of this.sessions.values()) {
-      try {
-        session.writeEmitter.dispose();
-        session.closeEmitter.dispose();
-        session.terminal.dispose();
-      } catch {
-        /* ignore */
-      }
+  private renderSession(session: PtySession, data: string): void {
+    session.writeEmitter.fire('\x1b[2J\x1b[3J\x1b[H');
+    session.writeEmitter.fire(REPLAY_BANNER);
+    if (data) {
+      session.writeEmitter.fire(data);
     }
-    this.sessions.clear();
+    session.cumulativeData = data;
+  }
+
+  private disposeSession(id: number): void {
+    const session = this.sessions.get(id);
+    if (!session) {
+      return;
+    }
+
+    try {
+      session.closeEmitter.fire();
+      session.writeEmitter.dispose();
+      session.closeEmitter.dispose();
+      session.terminal.dispose();
+    } catch {
+      /* ignore */
+    }
+
+    this.sessions.delete(id);
+  }
+
+  private disposeAllSessions(): void {
+    for (const id of [...this.sessions.keys()]) {
+      this.disposeSession(id);
+    }
   }
 }
