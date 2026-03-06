@@ -11,6 +11,9 @@ import { TerminalPlayer } from './terminalPlayer';
 export class Player implements vscode.Disposable {
   private readonly context: vscode.ExtensionContext;
   private readonly playbackStatusBar: vscode.StatusBarItem;
+  private readonly transportToggleStatusBar: vscode.StatusBarItem;
+  private readonly transportRestartStatusBar: vscode.StatusBarItem;
+  private readonly transportEditStatusBar: vscode.StatusBarItem;
 
   //  sub-modules 
   private readonly vfs    = new VfsEngine();
@@ -36,9 +39,34 @@ export class Player implements vscode.Disposable {
     this.playbackStatusBar.name = 'CodeScrim Playback Controls';
     this.playbackStatusBar.command = 'codescrim.revealPlayer';
     this.playbackStatusBar.hide();
+    this.transportToggleStatusBar = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Right,
+      1002,
+    );
+    this.transportToggleStatusBar.name = 'CodeScrim Toggle Playback';
+    this.transportToggleStatusBar.command = 'codescrim.togglePlayback';
+    this.transportToggleStatusBar.hide();
+    this.transportRestartStatusBar = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Right,
+      1001,
+    );
+    this.transportRestartStatusBar.name = 'CodeScrim Restart Playback';
+    this.transportRestartStatusBar.command = 'codescrim.restartPlayback';
+    this.transportRestartStatusBar.hide();
+    this.transportEditStatusBar = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Right,
+      1000,
+    );
+    this.transportEditStatusBar.name = 'CodeScrim Enter Edit Mode';
+    this.transportEditStatusBar.command = 'codescrim.enterEditMode';
+    this.transportEditStatusBar.hide();
     this.disposables.push(
       this.playbackStatusBar,
+      this.transportToggleStatusBar,
+      this.transportRestartStatusBar,
+      this.transportEditStatusBar,
       vscode.workspace.onDidChangeTextDocument(e => this.onUserEdit(e)),
+      vscode.window.onDidChangeActiveTextEditor(e => this.onActiveEditorChange(e)),
       vscode.window.onDidChangeTextEditorSelection(e => this.onEditorClick(e)),
       vscode.workspace.onWillSaveTextDocument(e => this.onWillSave(e)),
     );
@@ -68,6 +96,29 @@ export class Player implements vscode.Disposable {
     this.panel?.reveal(undefined, false);
   }
 
+  togglePlayback(): void {
+    if (!this.state || !this.panel) { return; }
+    this.panel.reveal(undefined, false);
+    this.postToWebview({ type: 'transportControl', action: 'togglePlayback' });
+  }
+
+  restartPlayback(): void {
+    if (!this.state || !this.panel) { return; }
+    this.panel.reveal(undefined, false);
+    this.state.currentTime = 0;
+    this.state.currentEventIndex = -1;
+    this.state.isEditMode = false;
+    this.postToWebview({ type: 'setEditMode', active: false });
+    this.postToWebview({ type: 'transportControl', action: 'restart' });
+    this.updatePlaybackStatusBar(this.state.isPlaying ? 'playing' : 'ready');
+  }
+
+  enterEditMode(): void {
+    if (!this.state || !this.panel) { return; }
+    this.panel.reveal(undefined, false);
+    this.postToWebview({ type: 'transportControl', action: 'requestEditMode' });
+  }
+
   //  core playback 
 
   private async startPlayback(scrim: ScrimFile): Promise<void> {
@@ -90,6 +141,7 @@ export class Player implements vscode.Disposable {
       isPlaying: false,
       currentTime: 0,
     };
+    void this.updatePlaybackContexts();
     this.updatePlaybackStatusBar('ready');
 
     // Seed initial file state
@@ -216,7 +268,9 @@ export class Player implements vscode.Disposable {
         break;
 
       case 'chapterClick':
+        this.state.currentTime = msg.timestamp;
         await this.syncToTime(msg.timestamp);
+        this.updatePlaybackStatusBar(this.state.isEditMode ? 'edit' : (this.state.isPlaying ? 'playing' : 'ready'));
         break;
     }
   }
@@ -289,6 +343,15 @@ export class Player implements vscode.Disposable {
     this.postToWebview({ type: 'forcePause' });
   }
 
+  /** Activating a tutorial file while playing should also pause into edit mode. */
+  private onActiveEditorChange(editor: vscode.TextEditor | undefined): void {
+    if (this.vfs.isUpdating) { return; }
+    if (!editor || !this.state?.isPlaying || this.state.isEditMode || !this.tempDir) { return; }
+    if (editor.document.uri.scheme !== 'file') { return; }
+    if (!editor.document.uri.fsPath.toLowerCase().startsWith(path.normalize(this.tempDir).toLowerCase())) { return; }
+    this.postToWebview({ type: 'forcePause' });
+  }
+
   /**
    * Ctrl+S during playback (non-edit mode): restore tutorial content to disk
    * so the file stays clean.  In edit mode, let the save go through normally.
@@ -345,6 +408,10 @@ export class Player implements vscode.Disposable {
   private updatePlaybackStatusBar(mode: 'ready' | 'playing' | 'edit' | 'ended'): void {
     if (!this.state) {
       this.playbackStatusBar.hide();
+      this.transportToggleStatusBar.hide();
+      this.transportRestartStatusBar.hide();
+      this.transportEditStatusBar.hide();
+      void this.updatePlaybackContexts();
       return;
     }
 
@@ -368,6 +435,34 @@ export class Player implements vscode.Disposable {
     }
 
     this.playbackStatusBar.show();
+    this.transportRestartStatusBar.text = '$(debug-restart)';
+    this.transportRestartStatusBar.tooltip = 'Restart the current CodeScrim replay';
+    this.transportRestartStatusBar.show();
+
+    if (mode === 'playing') {
+      this.transportToggleStatusBar.text = '$(debug-pause)';
+      this.transportToggleStatusBar.tooltip = 'Pause the current CodeScrim replay';
+    } else {
+      this.transportToggleStatusBar.text = '$(play)';
+      this.transportToggleStatusBar.tooltip = 'Play or resume the current CodeScrim replay';
+    }
+    this.transportToggleStatusBar.show();
+
+    this.transportEditStatusBar.text = '$(pencil)';
+    this.transportEditStatusBar.tooltip = 'Enter edit mode for the current CodeScrim replay';
+    if (mode === 'edit') {
+      this.transportEditStatusBar.hide();
+    } else {
+      this.transportEditStatusBar.show();
+    }
+
+    void this.updatePlaybackContexts();
+  }
+
+  private async updatePlaybackContexts(): Promise<void> {
+    await vscode.commands.executeCommand('setContext', 'codescrim.hasActivePlayer', Boolean(this.state));
+    await vscode.commands.executeCommand('setContext', 'codescrim.playbackPlaying', Boolean(this.state?.isPlaying));
+    await vscode.commands.executeCommand('setContext', 'codescrim.playbackEditMode', Boolean(this.state?.isEditMode));
   }
 
   //  helpers 
@@ -386,6 +481,10 @@ export class Player implements vscode.Disposable {
     this.tempDir = undefined;
     this.state   = undefined;
     this.playbackStatusBar.hide();
+    this.transportToggleStatusBar.hide();
+    this.transportRestartStatusBar.hide();
+    this.transportEditStatusBar.hide();
+    void this.updatePlaybackContexts();
   }
 
   dispose(): void {

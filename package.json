@@ -47,6 +47,24 @@
         "title": "CodeScrim: Open Tutorial (.scrim)",
         "category": "CodeScrim",
         "icon": "$(play-circle)"
+      },
+      {
+        "command": "codescrim.togglePlayback",
+        "title": "CodeScrim: Play or Pause Replay",
+        "category": "CodeScrim",
+        "icon": "$(play)"
+      },
+      {
+        "command": "codescrim.restartPlayback",
+        "title": "CodeScrim: Restart Replay",
+        "category": "CodeScrim",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "codescrim.enterEditMode",
+        "title": "CodeScrim: Enter Edit Mode",
+        "category": "CodeScrim",
+        "icon": "$(pencil)"
       }
     ],
     "menus": {
@@ -65,6 +83,18 @@
         },
         {
           "command": "codescrim.playScrim"
+        },
+        {
+          "command": "codescrim.togglePlayback",
+          "when": "codescrim.hasActivePlayer"
+        },
+        {
+          "command": "codescrim.restartPlayback",
+          "when": "codescrim.hasActivePlayer"
+        },
+        {
+          "command": "codescrim.enterEditMode",
+          "when": "codescrim.hasActivePlayer && !codescrim.playbackEditMode"
         }
       ],
       "editor/title": [
@@ -87,6 +117,21 @@
           "command": "codescrim.playScrim",
           "group": "navigation@97",
           "when": "!codescrim.isRecording"
+        },
+        {
+          "command": "codescrim.togglePlayback",
+          "group": "navigation@96",
+          "when": "codescrim.hasActivePlayer"
+        },
+        {
+          "command": "codescrim.restartPlayback",
+          "group": "navigation@95",
+          "when": "codescrim.hasActivePlayer"
+        },
+        {
+          "command": "codescrim.enterEditMode",
+          "group": "navigation@94",
+          "when": "codescrim.hasActivePlayer && !codescrim.playbackEditMode"
         }
       ]
     },

@@ -56,6 +56,18 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.registerCommand('codescrim.revealPlayer', () => {
         player?.reveal();
       }),
+
+      vscode.commands.registerCommand('codescrim.togglePlayback', () => {
+        player?.togglePlayback();
+      }),
+
+      vscode.commands.registerCommand('codescrim.restartPlayback', () => {
+        player?.restartPlayback();
+      }),
+
+      vscode.commands.registerCommand('codescrim.enterEditMode', () => {
+        player?.enterEditMode();
+      }),
     );
 
     // ── global status bar items ────────────────────────────────────────────────

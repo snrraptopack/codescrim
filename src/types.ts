@@ -100,4 +100,5 @@ export type ExtensionMessage =
   | { type: 'init'; scrim: ScrimFile }
   | { type: 'syncToTime'; time: number; chapter?: string }
   | { type: 'setEditMode'; active: boolean }
-  | { type: 'forcePause' };
+  | { type: 'forcePause' }
+  | { type: 'transportControl'; action: 'togglePlayback' | 'restart' | 'requestEditMode' };

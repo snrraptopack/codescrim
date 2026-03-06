@@ -259,6 +259,8 @@ let ytPlayer     = null;
 let currentEventIndex = 0;
 const totalEvents = ${totalEvents};
 let lastLocalSyncSentAt = -1;
+let localPlaybackUnlocked = false;
+let pendingLocalTransportAction = null;
 
 // Notify extension that the webview DOM + JS is ready
 vscode.postMessage({ type: 'ready' });
@@ -313,6 +315,7 @@ window.addEventListener('load', () => {
   });
   if (playBtn) {
     playBtn.addEventListener('click', () => {
+      localPlaybackUnlocked = true;
       if (vid.paused) {
         void vid.play();
       } else {
@@ -321,7 +324,17 @@ window.addEventListener('load', () => {
     });
   }
   if (transport) {
+    transport.addEventListener('click', () => {
+      if (!pendingLocalTransportAction) {
+        return;
+      }
+      localPlaybackUnlocked = true;
+      const action = pendingLocalTransportAction;
+      pendingLocalTransportAction = null;
+      executeLocalTransportAction(action);
+    });
     transport.addEventListener('dblclick', (event) => {
+      localPlaybackUnlocked = true;
       const target = event.target;
       if (!(target instanceof HTMLElement)) {
         return;
@@ -560,6 +573,67 @@ window.addEventListener('message', ev => {
     }
   }
 
+  if (msg.type === 'transportControl') {
+    const vid = document.getElementById('localVideo');
+    if (vid) {
+      if (!localPlaybackUnlocked && (msg.action === 'togglePlayback' || msg.action === 'restart')) {
+        pendingLocalTransportAction = msg.action;
+        setStatus('idle', 'Click once in the player to start replay');
+        const note = document.getElementById('localMediaError');
+        if (note) {
+          note.textContent = 'Playback is armed. Click once in the player controls area to begin.';
+        }
+      } else {
+        executeLocalTransportAction(msg.action);
+      }
+      return;
+    }
+
+    if (ytPlayer && typeof ytPlayer.getPlayerState === 'function') {
+      const state = ytPlayer.getPlayerState();
+      if (msg.action === 'togglePlayback') {
+        if (state === YT.PlayerState.PLAYING) {
+          ytPlayer.pauseVideo();
+        } else {
+          ytPlayer.playVideo();
+        }
+      } else if (msg.action === 'restart') {
+        ytPlayer.seekTo(0, true);
+        ytPlayer.playVideo();
+      } else if (msg.action === 'requestEditMode') {
+        if (state === YT.PlayerState.PLAYING) {
+          ytPlayer.pauseVideo();
+        } else {
+          const currentTime = typeof ytPlayer.getCurrentTime === 'function' ? ytPlayer.getCurrentTime() : 0;
+          vscode.postMessage({ type: 'editRequested', time: currentTime });
+        }
+      }
+      return;
+    }
+
+    if (msg.action === 'restart') {
+      customTimePausedAt = 0;
+      customTimerStart = Date.now();
+      const scrubber = document.getElementById('customScrubber');
+      if (scrubber) scrubber.value = '0';
+      const timeDisplay = document.getElementById('customTimeDisplay');
+      const maxTime = scrubber ? parseFloat(scrubber.max) : 0;
+      if (timeDisplay) timeDisplay.textContent = formatTime(0) + ' / ' + formatTime(maxTime);
+    }
+
+    if (msg.action === 'requestEditMode') {
+      const btn = document.getElementById('customPlayBtn');
+      if (btn && btn.innerHTML.includes('⏸')) {
+        toggleCustomPlay();
+      } else {
+        vscode.postMessage({ type: 'editRequested', time: customTimePausedAt });
+      }
+      return;
+    }
+
+    toggleCustomPlay();
+  }
+
   if (msg.type === 'syncToTime') {
     if (msg.chapter) {
       document.getElementById('activeChapterLabel').textContent = msg.chapter;
@@ -581,6 +655,40 @@ window.addEventListener('message', ev => {
     setStatus('idle', 'Ready — press ▶ to start');
   }
 });
+
+function executeLocalTransportAction(action) {
+  const vid = document.getElementById('localVideo');
+  if (!vid) {
+    return;
+  }
+
+  const note = document.getElementById('localMediaError');
+  if (note) {
+    note.textContent = '';
+  }
+
+  if (action === 'togglePlayback') {
+    if (vid.paused) {
+      void vid.play();
+    } else {
+      vid.pause();
+    }
+    return;
+  }
+
+  if (action === 'restart') {
+    vid.currentTime = 0;
+    updateLocalTransport(0, vid.duration);
+    void vid.play();
+    return;
+  }
+
+  if (!vid.paused) {
+    vid.pause();
+  } else {
+    vscode.postMessage({ type: 'editRequested', time: vid.currentTime });
+  }
+}
 </script>
 </body>
 </html>`;
