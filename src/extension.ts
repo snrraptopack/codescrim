@@ -52,6 +52,10 @@ export function activate(context: vscode.ExtensionContext): void {
           }
         },
       ),
+
+      vscode.commands.registerCommand('codescrim.revealPlayer', () => {
+        player?.reveal();
+      }),
     );
 
     // ── global status bar items ────────────────────────────────────────────────

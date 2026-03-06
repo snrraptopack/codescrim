@@ -5,6 +5,8 @@ import * as os from 'os';
 import { ScrimEvent, ScrimFile, SerializableSelection } from './types';
 import { shouldIgnorePath } from './utils';
 import { TerminalRecorder } from './terminalRecorder';
+import { scanWorkspaceSnapshot } from './workspaceSnapshot';
+import { WorkspaceStructureRecorder } from './workspaceStructureRecorder';
 
 /* ─────────────────────────────────────────────────────────────────────────────
  *  Path helpers — kept dead-simple to avoid cross-case bugs on Windows
@@ -49,9 +51,11 @@ export class Recorder implements vscode.Disposable {
   private _startTime = 0;
   private _events: ScrimEvent[] = [];
   private _lastContent: Record<string, string> = {};   // rel → latest text
+  private _knownDirectories = new Set<string>();
 
   // ── sub-modules ──────────────────────────────────────────────────────────
   private terminalRecorder = new TerminalRecorder();
+  private structureRecorder = new WorkspaceStructureRecorder();
 
   // ── ui ───────────────────────────────────────────────────────────────────
   private statusBar: vscode.StatusBarItem;
@@ -61,12 +65,14 @@ export class Recorder implements vscode.Disposable {
     this.context = context;
     this.log = vscode.window.createOutputChannel('CodeScrim Recorder');
     this.statusBar = vscode.window.createStatusBarItem(
-      vscode.StatusBarAlignment.Left, 200,
+      vscode.StatusBarAlignment.Right, 1000,
     );
+    this.statusBar.name = 'CodeScrim Recording Timer';
     this.statusBar.command = 'codescrim.stopRecording';
     context.subscriptions.push(
       this.statusBar,
       this.log,
+      this.structureRecorder,
       vscode.workspace.onDidChangeTextDocument(e => this.handleDocChange(e)),
       vscode.workspace.onDidSaveTextDocument(d => this.handleDocumentSave(d)),
       vscode.window.onDidChangeActiveTextEditor(e => this.handleEditorSwitch(e)),
@@ -97,6 +103,7 @@ export class Recorder implements vscode.Disposable {
     this._recording = true;
     this._events = [];
     this._lastContent = {};
+    this._knownDirectories = new Set<string>();
     await this.context.workspaceState.update('codescrim.title', title.trim());
     vscode.commands.executeCommand('setContext', 'codescrim.isRecording', true);
 
@@ -105,6 +112,21 @@ export class Recorder implements vscode.Disposable {
 
     // ── capture "frame 0" — the existing codebase ──────────────────────────
     this.captureSetup();
+    this.structureRecorder.start({
+      root: getWorkspaceRoot(),
+      timestamp: () => this.ts(),
+      pushEvent: ev => this._events.push(ev),
+      readKnownContent: rel => this._lastContent[rel],
+      writeKnownContent: (rel, content) => {
+        if (content === undefined) {
+          delete this._lastContent[rel];
+          return;
+        }
+        this._lastContent[rel] = content;
+      },
+      knownDirectories: this._knownDirectories,
+      log: message => this.log.appendLine(message),
+    });
     this.log.appendLine(`[start] title="${title.trim()}" setupFiles=${Object.keys(this._lastContent).length}`);
     console.log(`[CodeScrim] setup captured — ${this._events.length} events, files: ${Object.keys(this._lastContent).join(', ')}`);
 
@@ -150,6 +172,7 @@ export class Recorder implements vscode.Disposable {
     this._recording = false;
     vscode.commands.executeCommand('setContext', 'codescrim.isRecording', false);
     if (this.clockTimer) { clearInterval(this.clockTimer); this.clockTimer = undefined; }
+    this.structureRecorder.stop();
 
     const title = this.context.workspaceState.get<string>('codescrim.title') ?? 'untitled';
     this.statusBar.text = '$(check) CodeScrim: Saving…';
@@ -217,6 +240,8 @@ export class Recorder implements vscode.Disposable {
       if (!rel) { return; }
       if (shouldIgnorePath(rel)) { return; }
 
+      this.rememberParentDirectories(rel);
+
       const currentText = e.document.getText();
       const previousText = this._lastContent[rel];
 
@@ -271,6 +296,8 @@ export class Recorder implements vscode.Disposable {
       const rel = relPath(document.uri.fsPath);
       if (!rel) { return; }
       if (shouldIgnorePath(rel)) { return; }
+
+      this.rememberParentDirectories(rel);
 
       const currentText = document.getText();
       const previousText = this._lastContent[rel];
@@ -342,22 +369,21 @@ export class Recorder implements vscode.Disposable {
     const maxBytes = (vscode.workspace.getConfiguration('codescrim')
       .get<number>('maxFileSizeKb', 500)) * 1024;
 
-    const files: Record<string, string> = {};
+    const snapshot = scanWorkspaceSnapshot(getWorkspaceRoot(), maxBytes);
 
-    for (const doc of vscode.workspace.textDocuments) {
-      if (doc.uri.scheme !== 'file') { continue; }
-      if (doc.isUntitled) { continue; }
-      if (doc.getText().length > maxBytes) { continue; }
-      const rel = relPath(doc.uri.fsPath);
-      if (!rel) { continue; }
-      if (shouldIgnorePath(rel)) { continue; }
-      files[rel] = doc.getText();
+    this._lastContent = { ...snapshot.files };
+    this._knownDirectories = new Set(snapshot.directories);
+
+    if (Object.keys(snapshot.files).length === 0 && snapshot.directories.length === 0) {
+      return;
     }
 
-    if (Object.keys(files).length === 0) { return; }
-
-    this._lastContent = { ...files };
-    this._events.push({ type: 'setup', timestamp: 0, files });
+    this._events.push({
+      type: 'setup',
+      timestamp: 0,
+      files: snapshot.files,
+      directories: snapshot.directories,
+    });
   }
 
   /* ══════════════════════════════════════════════════════════════════════════
@@ -373,16 +399,27 @@ export class Recorder implements vscode.Disposable {
     const m = Math.floor(elapsed / 60).toString().padStart(2, '0');
     const s = Math.floor(elapsed % 60).toString().padStart(2, '0');
     this.statusBar.text =
-      `$(record) CodeScrim ${m}:${s}  ·  ${this._events.length} events  —  click to stop`;
+      `$(primitive-dot) REC ${m}:${s}  ·  ${this._events.length}`;
     this.statusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
-    this.statusBar.tooltip = 'Click to stop recording and save tutorial';
+    this.statusBar.color = new vscode.ThemeColor('statusBarItem.errorForeground');
+    this.statusBar.tooltip = 'CodeScrim is recording. Click to stop and save.';
   }
 
   dispose(): void {
     if (this.clockTimer) { clearInterval(this.clockTimer); }
     this.terminalRecorder.dispose();
-    this.log.dispose();
+    this.structureRecorder.dispose();
     this.statusBar.dispose();
+  }
+
+  private rememberParentDirectories(relativePath: string): void {
+    const parts = relativePath.split('/');
+    parts.pop();
+    let current = '';
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      this._knownDirectories.add(current);
+    }
   }
 }
 

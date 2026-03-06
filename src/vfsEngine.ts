@@ -51,6 +51,8 @@ export interface SyncResult {
 export class VfsEngine {
   /** Ground-truth in-memory content of every temp tutorial file */
   private _snapshot: Record<string, string> = {};
+  /** Known directory tree for the tutorial workspace */
+  private _directories = new Set<string>();
   /** Ref-count: >0 means the engine is currently writing to the workspace */
   private _depth = 0;
 
@@ -65,6 +67,7 @@ export class VfsEngine {
 
   reset(): void {
     this._snapshot = {};
+    this._directories = new Set<string>();
     this._depth = 0;
   }
 
@@ -75,9 +78,18 @@ export class VfsEngine {
    * snapshot.  Patches open TextDocuments if they're already visible.
    */
   async applySetup(
-    ev: { type: 'setup'; files: Record<string, string> },
+    ev: { type: 'setup'; files: Record<string, string>; directories?: string[] },
     tempDir: string,
   ): Promise<void> {
+    this._directories = new Set(ev.directories ?? []);
+
+    for (const dir of [...this._directories].sort((a, b) => a.length - b.length)) {
+      const fullPath = path.join(tempDir, dir);
+      if (!fs.existsSync(fullPath)) {
+        fs.mkdirSync(fullPath, { recursive: true });
+      }
+    }
+
     for (const [rel, content] of Object.entries(ev.files)) {
       const fullPath = path.join(tempDir, rel);
       const dir = path.dirname(fullPath);
@@ -115,11 +127,13 @@ export class VfsEngine {
     // 1. Build VFS in memory
     const vfs: Record<string, string> = {};
     const setup = events.find((e) => e.type === 'setup') as
-      | { type: 'setup'; files: Record<string, string> }
+      | { type: 'setup'; files: Record<string, string>; directories?: string[] }
       | undefined;
+    const directories = new Set<string>(setup?.directories ?? []);
     if (setup) {
       for (const [rel, content] of Object.entries(setup.files)) {
         vfs[rel] = content;
+        addParentDirectories(rel, directories);
       }
     }
 
@@ -138,9 +152,11 @@ export class VfsEngine {
 
       if (ev.type === 'edit' && ev.file && typeof vfs[ev.file] === 'string') {
         vfs[ev.file] = applyChanges(vfs[ev.file], ev.changes);
+        activeFile = ev.file;
       } else if (ev.type === 'snapshot') {
         for (const [rel, content] of Object.entries(ev.files)) {
           vfs[rel] = content;
+          addParentDirectories(rel, directories);
         }
         if (ev.activeFile) {
           activeFile = ev.activeFile;
@@ -148,6 +164,15 @@ export class VfsEngine {
         if (ev.selections && ev.selections.length > 0) {
           selections = ev.selections.map(toSelection);
         }
+      } else if (ev.type === 'createFile') {
+        vfs[ev.file] = ev.content;
+        addParentDirectories(ev.file, directories);
+      } else if (ev.type === 'deleteFile') {
+        delete vfs[ev.file];
+      } else if (ev.type === 'createDirectory') {
+        addDirectoryChain(ev.path, directories);
+      } else if (ev.type === 'deleteDirectory') {
+        deleteDirectoryTree(ev.path, vfs, directories);
       } else if (ev.type === 'openFile') {
         activeFile = ev.file;
       } else if (ev.type === 'selection') {
@@ -162,10 +187,32 @@ export class VfsEngine {
 
     // 2. Persist snapshot
     this._snapshot = { ...vfs };
+    this._directories = new Set(directories);
 
     // 3. Commit to workspace
     this._depth++;
     try {
+      const disk = collectDiskState(tempDir);
+
+      for (const rel of [...disk.files].sort((a, b) => b.length - a.length)) {
+        if (vfs[rel] !== undefined) { continue; }
+        const fullPath = path.join(tempDir, rel);
+        try { fs.rmSync(fullPath, { force: true }); } catch { /* ignore */ }
+      }
+
+      for (const rel of [...disk.directories].sort((a, b) => b.length - a.length)) {
+        if (directories.has(rel)) { continue; }
+        const fullPath = path.join(tempDir, rel);
+        try { fs.rmSync(fullPath, { recursive: true, force: true }); } catch { /* ignore */ }
+      }
+
+      for (const rel of [...directories].sort((a, b) => a.length - b.length)) {
+        const fullPath = path.join(tempDir, rel);
+        if (!fs.existsSync(fullPath)) {
+          fs.mkdirSync(fullPath, { recursive: true });
+        }
+      }
+
       const wsEdit = new vscode.WorkspaceEdit();
       for (const [rel, content] of Object.entries(vfs)) {
         const fullPath = path.join(tempDir, rel);
@@ -271,29 +318,21 @@ export class VfsEngine {
     }
 
     if (ev.type === 'openFile') {
-      const fullPath = path.join(tempDir, ev.file);
-      try {
-        const openDoc = vscode.workspace.textDocuments.find(
-          (d) => norm(d.uri.fsPath) === norm(fullPath),
-        );
-        const doc = await vscode.workspace.openTextDocument(
-          openDoc ? openDoc.uri : vscode.Uri.file(fullPath),
-        );
-        await vscode.window.showTextDocument(doc, {
-          preserveFocus: true,
-          preview: false,
-          viewColumn: vscode.ViewColumn.One,
-        });
-      } catch (e) {
-        console.error('CodeScrim VfsEngine: openFile failed', e);
-      }
+      await this.revealFile(tempDir, ev.file);
     } else if (ev.type === 'edit') {
       // Keep snapshot in sync
       if (typeof this._snapshot[ev.file] === 'string') {
         this._snapshot[ev.file] = applyChanges(this._snapshot[ev.file], ev.changes);
+      } else {
+        this._snapshot[ev.file] = applyChanges('', ev.changes);
+        addParentDirectories(ev.file, this._directories);
       }
 
       const fullPath = path.join(tempDir, ev.file);
+      const parentDir = path.dirname(fullPath);
+      if (!fs.existsSync(parentDir)) {
+        fs.mkdirSync(parentDir, { recursive: true });
+      }
       const openDoc = vscode.workspace.textDocuments.find(
         (d) => norm(d.uri.fsPath) === norm(fullPath),
       );
@@ -311,10 +350,29 @@ export class VfsEngine {
         );
       }
       await vscode.workspace.applyEdit(wsEdit);
+      await this.revealFile(tempDir, ev.file);
+    } else if (ev.type === 'createFile') {
+      this._snapshot[ev.file] = ev.content;
+      addParentDirectories(ev.file, this._directories);
+
+      const fullPath = path.join(tempDir, ev.file);
+      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+      fs.writeFileSync(fullPath, ev.content, 'utf8');
+    } else if (ev.type === 'deleteFile') {
+      delete this._snapshot[ev.file];
+      const fullPath = path.join(tempDir, ev.file);
+      try { fs.rmSync(fullPath, { force: true }); } catch { /* ignore */ }
+    } else if (ev.type === 'createDirectory') {
+      addDirectoryChain(ev.path, this._directories);
+      fs.mkdirSync(path.join(tempDir, ev.path), { recursive: true });
+    } else if (ev.type === 'deleteDirectory') {
+      deleteDirectoryTree(ev.path, this._snapshot, this._directories);
+      try { fs.rmSync(path.join(tempDir, ev.path), { recursive: true, force: true }); } catch { /* ignore */ }
     } else if (ev.type === 'snapshot') {
       const wsEdit = new vscode.WorkspaceEdit();
       for (const [rel, content] of Object.entries(ev.files)) {
         this._snapshot[rel] = content;
+        addParentDirectories(rel, this._directories);
         const fullPath = path.join(tempDir, rel);
         const dir = path.dirname(fullPath);
         if (!fs.existsSync(dir)) {
@@ -344,10 +402,7 @@ export class VfsEngine {
         }
       }
     } else if (ev.type === 'selection') {
-      const fullPath = path.join(tempDir, ev.file);
-      const editor = vscode.window.visibleTextEditors.find(
-        (e) => norm(e.document.uri.fsPath) === norm(fullPath),
-      );
+      const editor = await this.revealFile(tempDir, ev.file);
       if (editor) {
         editor.selections = ev.selections.map(toSelection);
       }
@@ -355,4 +410,83 @@ export class VfsEngine {
       onChapter?.(ev.title, ev.timestamp);
     }
   }
+
+  private async revealFile(tempDir: string, relativePath: string): Promise<vscode.TextEditor | undefined> {
+    const fullPath = path.join(tempDir, relativePath);
+    try {
+      const openDoc = vscode.workspace.textDocuments.find(
+        (d) => norm(d.uri.fsPath) === norm(fullPath),
+      );
+      const doc = await vscode.workspace.openTextDocument(
+        openDoc ? openDoc.uri : vscode.Uri.file(fullPath),
+      );
+      return await vscode.window.showTextDocument(doc, {
+        preserveFocus: true,
+        preview: false,
+        viewColumn: vscode.ViewColumn.One,
+      });
+    } catch (e) {
+      console.error('CodeScrim VfsEngine: revealFile failed', e);
+      return undefined;
+    }
+  }
+}
+
+function addDirectoryChain(relativeDir: string, directories: Set<string>): void {
+  if (!relativeDir || relativeDir === '.') { return; }
+  const parts = relativeDir.split('/');
+  let current = '';
+  for (const part of parts) {
+    current = current ? `${current}/${part}` : part;
+    directories.add(current);
+  }
+}
+
+function addParentDirectories(relativeFilePath: string, directories: Set<string>): void {
+  const dir = path.posix.dirname(relativeFilePath);
+  addDirectoryChain(dir, directories);
+}
+
+function deleteDirectoryTree(
+  relativeDir: string,
+  files: Record<string, string>,
+  directories: Set<string>,
+): void {
+  for (const file of Object.keys(files)) {
+    if (file.startsWith(`${relativeDir}/`)) {
+      delete files[file];
+    }
+  }
+  for (const dir of [...directories]) {
+    if (dir === relativeDir || dir.startsWith(`${relativeDir}/`)) {
+      directories.delete(dir);
+    }
+  }
+}
+
+function collectDiskState(root: string): { files: Set<string>; directories: Set<string> } {
+  const files = new Set<string>();
+  const directories = new Set<string>();
+
+  if (!fs.existsSync(root)) {
+    return { files, directories };
+  }
+
+  const walk = (dir: string): void => {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      const rel = path.relative(root, fullPath).replace(/\\/g, '/');
+      if (!rel) { continue; }
+      if (entry.isDirectory()) {
+        directories.add(rel);
+        walk(fullPath);
+      } else if (entry.isFile()) {
+        files.add(rel);
+      }
+    }
+  };
+
+  walk(root);
+  return { files, directories };
 }

@@ -24,6 +24,12 @@ export interface SerializableTextChange {
   range: SerializableRange;
 }
 
+export type WorkspaceStructureEvent =
+  | { type: 'createFile'; timestamp: number; file: string; content: string }
+  | { type: 'deleteFile'; timestamp: number; file: string }
+  | { type: 'createDirectory'; timestamp: number; path: string }
+  | { type: 'deleteDirectory'; timestamp: number; path: string };
+
 // ── Terminal events (recorded via TerminalRecorder, replayed by TerminalPlayer) ──
 export type TerminalEvent =
   | { type: 'terminalOpen';  timestamp: number; terminalId: number; name: string }
@@ -36,12 +42,13 @@ export function isTerminalEvent(ev: ScrimEvent): ev is TerminalEvent {
 }
 
 export type ScrimEvent =
-  | { type: 'setup'; timestamp: number; files: Record<string, string> }
+  | { type: 'setup'; timestamp: number; files: Record<string, string>; directories?: string[] }
   | { type: 'snapshot'; timestamp: number; files: Record<string, string>; activeFile?: string; selections?: SerializableSelection[] }
   | { type: 'edit'; timestamp: number; file: string; changes: SerializableTextChange[] }
   | { type: 'openFile'; timestamp: number; file: string }
   | { type: 'selection'; timestamp: number; file: string; selections: SerializableSelection[] }
   | { type: 'chapter'; timestamp: number; title: string; description?: string }
+  | WorkspaceStructureEvent
   | TerminalEvent;
 
 export type VideoType = 'youtube' | 'vimeo' | 'local' | 'generic';

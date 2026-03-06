@@ -10,6 +10,7 @@ import { TerminalPlayer } from './terminalPlayer';
 
 export class Player implements vscode.Disposable {
   private readonly context: vscode.ExtensionContext;
+  private readonly playbackStatusBar: vscode.StatusBarItem;
 
   //  sub-modules 
   private readonly vfs    = new VfsEngine();
@@ -28,7 +29,15 @@ export class Player implements vscode.Disposable {
 
   constructor(context: vscode.ExtensionContext) {
     this.context = context;
+    this.playbackStatusBar = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Right,
+      999,
+    );
+    this.playbackStatusBar.name = 'CodeScrim Playback Controls';
+    this.playbackStatusBar.command = 'codescrim.revealPlayer';
+    this.playbackStatusBar.hide();
     this.disposables.push(
+      this.playbackStatusBar,
       vscode.workspace.onDidChangeTextDocument(e => this.onUserEdit(e)),
       vscode.window.onDidChangeTextEditorSelection(e => this.onEditorClick(e)),
       vscode.workspace.onWillSaveTextDocument(e => this.onWillSave(e)),
@@ -55,6 +64,10 @@ export class Player implements vscode.Disposable {
     }
   }
 
+  reveal(): void {
+    this.panel?.reveal(undefined, false);
+  }
+
   //  core playback 
 
   private async startPlayback(scrim: ScrimFile): Promise<void> {
@@ -77,6 +90,7 @@ export class Player implements vscode.Disposable {
       isPlaying: false,
       currentTime: 0,
     };
+    this.updatePlaybackStatusBar('ready');
 
     // Seed initial file state
     const setup = scrim.events.find(e => e.type === 'setup') as
@@ -122,6 +136,7 @@ export class Player implements vscode.Disposable {
     switch (msg.type) {
       case 'ready':
         this.postToWebview({ type: 'init', scrim: this.state.scrim });
+        this.updatePlaybackStatusBar('ready');
         break;
 
       case 'timeUpdate':
@@ -132,6 +147,7 @@ export class Player implements vscode.Disposable {
           await this.syncToTime(msg.time);
         }
         this.state.currentTime = msg.time;
+        this.updatePlaybackStatusBar(this.state.isPlaying ? 'playing' : 'ready');
         break;
 
       case 'paused':
@@ -139,6 +155,7 @@ export class Player implements vscode.Disposable {
         this.state.isEditMode = true;
         this.state.currentTime = msg.time;
         this.postToWebview({ type: 'setEditMode', active: true });
+        this.updatePlaybackStatusBar('edit');
         vscode.window.setStatusBarMessage(
           '$(pencil) CodeScrim: Paused  edit mode active. The code is yours!', 6000,
         );
@@ -155,6 +172,7 @@ export class Player implements vscode.Disposable {
         } else {
           this.state.currentTime = msg.time;
         }
+        this.updatePlaybackStatusBar('playing');
         break;
 
       case 'ended':
@@ -163,6 +181,7 @@ export class Player implements vscode.Disposable {
         this.state.currentEventIndex = -1;
         this.state.currentTime     = 0;
         this.postToWebview({ type: 'setEditMode', active: false });
+        this.updatePlaybackStatusBar('ended');
         vscode.window.showInformationMessage(' Tutorial complete! Great job.');
         break;
 
@@ -171,6 +190,7 @@ export class Player implements vscode.Disposable {
         this.state.isEditMode = true;
         this.state.currentTime = msg.time;
         this.postToWebview({ type: 'setEditMode', active: true });
+        this.updatePlaybackStatusBar('edit');
         await this.ensureEditorFocus();
         break;
 
@@ -295,10 +315,38 @@ export class Player implements vscode.Disposable {
     try {
       const fullPath = path.join(this.tempDir, activeFile);
       const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fullPath));
-      await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One, preserveFocus: false });
+      await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.One, preserveFocus: true });
     } catch {
       /* file may not exist yet during initial setup  ignore */
     }
+  }
+
+  private updatePlaybackStatusBar(mode: 'ready' | 'playing' | 'edit' | 'ended'): void {
+    if (!this.state) {
+      this.playbackStatusBar.hide();
+      return;
+    }
+
+    const title = this.state.scrim.title;
+    if (mode === 'playing') {
+      this.playbackStatusBar.text = `$(play) ${title}`;
+      this.playbackStatusBar.tooltip = 'CodeScrim is playing. Click to open the player.';
+      this.playbackStatusBar.backgroundColor = undefined;
+    } else if (mode === 'edit') {
+      this.playbackStatusBar.text = `$(pencil) Edit Mode · ${title}`;
+      this.playbackStatusBar.tooltip = 'CodeScrim is paused in edit mode. Click to return to the player.';
+      this.playbackStatusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+    } else if (mode === 'ended') {
+      this.playbackStatusBar.text = `$(debug-restart) Replay Finished · ${title}`;
+      this.playbackStatusBar.tooltip = 'Replay finished. Click to reopen the player and restart.';
+      this.playbackStatusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.prominentBackground');
+    } else {
+      this.playbackStatusBar.text = `$(watch) Ready · ${title}`;
+      this.playbackStatusBar.tooltip = 'CodeScrim player is ready. Click to open the player.';
+      this.playbackStatusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.prominentBackground');
+    }
+
+    this.playbackStatusBar.show();
   }
 
   //  helpers 
@@ -316,6 +364,7 @@ export class Player implements vscode.Disposable {
     }
     this.tempDir = undefined;
     this.state   = undefined;
+    this.playbackStatusBar.hide();
   }
 
   dispose(): void {
