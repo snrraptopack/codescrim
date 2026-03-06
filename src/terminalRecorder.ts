@@ -81,14 +81,15 @@ export class TerminalRecorder implements vscode.Disposable {
         const terminalId = this.idFor(event.terminal);
         const commandLine = event.execution.commandLine.value;
         const timestamp = this.ts();
+        const cwdLabel = this.formatCwd(event.execution.cwd);
 
         this.logger?.(
-          `[terminal:exec:start] id=${terminalId} name="${event.terminal.name}" ts=${timestamp.toFixed(3)} command=${JSON.stringify(commandLine)}`,
+          `[terminal:exec:start] id=${terminalId} name="${event.terminal.name}" ts=${timestamp.toFixed(3)} cwd=${JSON.stringify(cwdLabel)} command=${JSON.stringify(commandLine)}`,
         );
 
         // Record the command itself as a data event
         if (commandLine.trim()) {
-          const cmdData = `\x1b[1m$ ${commandLine}\x1b[0m\r\n`;
+          const cmdData = this.formatCommandPrompt(event.terminal, cwdLabel, commandLine);
           this.events.push({
             type: 'terminal',
             timestamp,
@@ -229,5 +230,39 @@ export class TerminalRecorder implements vscode.Disposable {
 
   private ts(): number {
     return this.getTimestamp ? this.getTimestamp() : 0;
+  }
+
+  private formatCommandPrompt(terminal: vscode.Terminal, cwdLabel: string | undefined, commandLine: string): string {
+    const shellName = terminal.name.toLowerCase();
+    const promptPrefix = this.buildPromptPrefix(shellName, cwdLabel);
+    return `\x1b[90m${promptPrefix}\x1b[0m\x1b[1m${commandLine}\x1b[0m\r\n`;
+  }
+
+  private buildPromptPrefix(shellName: string, cwdLabel: string | undefined): string {
+    if (shellName.includes('powershell') || shellName.includes('pwsh')) {
+      return cwdLabel ? `PS ${cwdLabel}> ` : 'PS > ';
+    }
+
+    if (shellName.includes('cmd')) {
+      return cwdLabel ? `${cwdLabel}> ` : '> ';
+    }
+
+    if (shellName.includes('fish')) {
+      return cwdLabel ? `${cwdLabel}> ` : '> ';
+    }
+
+    return cwdLabel ? `${cwdLabel}$ ` : '$ ';
+  }
+
+  private formatCwd(cwd: vscode.Uri | undefined): string | undefined {
+    if (!cwd) {
+      return undefined;
+    }
+
+    if (cwd.scheme === 'file') {
+      return cwd.fsPath;
+    }
+
+    return cwd.toString();
   }
 }
