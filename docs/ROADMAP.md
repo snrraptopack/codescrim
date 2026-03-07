@@ -107,23 +107,53 @@ terminalClose — a terminal was closed
 
 ---
 
+### 8. Protected Package + Server-Gated Playback `[ ]`
+**Goal:** Support paid/private tutorials that can be stored locally or hosted remotely, but only played through authenticated, server-authorized access.
+
+**Why:** If CodeScrim later ships subscription content, plain `.scrim` + audio files are too easy to copy and replay outside the official licensing flow. The extension should be able to require authentication and entitlement checks before playback.
+
+**Target model:**
+- Keep plain `.scrim` as an open/local development format
+- Introduce a protected package format for paid content
+- Encrypt the tutorial payload with a per-package content key
+- Keep key release server-controlled and short-lived
+- Require auth + subscription/entitlement checks before playback starts
+- Allow the server to refuse playback after subscription expiry, even if the package is already on disk
+
+**Possible architecture:**
+- Package contains metadata + encrypted tutorial payload + signature, but not usable plaintext tutorial data
+- Audio is either encrypted too, or served through short-lived signed URLs
+- Extension authenticates, requests entitlement, receives a short-lived playback key, decrypts in memory, and avoids long-lived plaintext cache where possible
+- Package signatures protect against metadata tampering
+
+**Non-goal:** Perfect DRM. A determined user can always inspect a client they control. The objective is strong license enforcement and paid-content gating, not impossible extraction.
+
+**Future implementation areas:**
+- Protected package spec (`tutorialId`, encrypted payload, signature, media manifest)
+- Extension auth/token handling
+- Backend entitlement API
+- Remote tutorial fetch flow
+- Optional native-side decrypt/verify path for harder client bypass
+
+---
+
 ## 🟢 Quick Wins
 
-### 8. `.scrim` Explorer Icon + Play Button `[ ]`
+### 9. `.scrim` Explorer Icon + Play Button `[ ]`
 **Goal:** Register a custom file icon and a tree-item decorator so `.scrim` files show a ▶ button in the Explorer sidebar without needing the status bar.
 
 **Key files:** `package.json`, `src/extension.ts`
 
 ---
 
-### 9. Recorder Undo Awareness `[ ]`
+### 10. Recorder Undo Awareness `[ ]`
 **Goal:** Detect `Ctrl+Z` during recording (the change event has `reason: TextDocumentChangeReason.Undo`) and record it as a snapshot, not an inverse edit, to prevent replay corruption.
 
 **Key files:** `src/recorder.ts`
 
 ---
 
-### 10. `currentEventIndex` Drift Recovery `[ ]`
+### 11. `currentEventIndex` Drift Recovery `[ ]`
 **Goal:** If `applyEvent` throws for a malformed event, the index still advances so playback doesn't freeze permanently at one bad event.
 
 **Key files:** `src/player.ts` _(try/catch in `advanceToTime` already logs, but index isn't always advanced on failure)_

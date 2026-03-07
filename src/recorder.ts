@@ -39,6 +39,77 @@ function relPath(absPath: string): string | undefined {
   return rel.replace(/\\/g, '/');
 }
 
+function normalizeRecordedAudio(buffer: Buffer): { buffer: Buffer; gainApplied: number } {
+  if (buffer.length < 44 || buffer.toString('ascii', 0, 4) !== 'RIFF' || buffer.toString('ascii', 8, 12) !== 'WAVE') {
+    return { buffer, gainApplied: 1 };
+  }
+
+  let offset = 12;
+  let audioFormat = 0;
+  let bitsPerSample = 0;
+  let dataOffset = -1;
+  let dataSize = 0;
+
+  while (offset + 8 <= buffer.length) {
+    const chunkId = buffer.toString('ascii', offset, offset + 4);
+    const chunkSize = buffer.readUInt32LE(offset + 4);
+    const chunkDataStart = offset + 8;
+    const nextOffset = chunkDataStart + chunkSize + (chunkSize % 2);
+
+    if (nextOffset > buffer.length) {
+      break;
+    }
+
+    if (chunkId === 'fmt ' && chunkSize >= 16) {
+      audioFormat = buffer.readUInt16LE(chunkDataStart);
+      bitsPerSample = buffer.readUInt16LE(chunkDataStart + 14);
+    } else if (chunkId === 'data') {
+      dataOffset = chunkDataStart;
+      dataSize = chunkSize;
+      break;
+    }
+
+    offset = nextOffset;
+  }
+
+  if (audioFormat !== 1 || bitsPerSample !== 16 || dataOffset < 0 || dataSize < 2) {
+    return { buffer, gainApplied: 1 };
+  }
+
+  let peak = 0;
+  for (let sampleOffset = dataOffset; sampleOffset + 1 < dataOffset + dataSize; sampleOffset += 2) {
+    const sample = buffer.readInt16LE(sampleOffset);
+    const absSample = Math.abs(sample);
+    if (absSample > peak) {
+      peak = absSample;
+    }
+  }
+
+  if (peak === 0) {
+    return { buffer, gainApplied: 1 };
+  }
+
+  const targetPeak = Math.floor(i16Max * 0.92);
+  const gainApplied = Math.min(targetPeak / peak, 8);
+  if (gainApplied <= 1.15) {
+    return { buffer, gainApplied: 1 };
+  }
+
+  const normalized = Buffer.from(buffer);
+  for (let sampleOffset = dataOffset; sampleOffset + 1 < dataOffset + dataSize; sampleOffset += 2) {
+    const boosted = Math.round(normalized.readInt16LE(sampleOffset) * gainApplied);
+    normalized.writeInt16LE(clampInt16(boosted), sampleOffset);
+  }
+
+  return { buffer: normalized, gainApplied };
+}
+
+const i16Max = 32767;
+
+function clampInt16(sample: number): number {
+  return Math.max(-i16Max - 1, Math.min(i16Max, sample));
+}
+
 /* ─────────────────────────────────────────────────────────────────────────────
  *  Recorder
  * ─────────────────────────────────────────────────────────────────────────── */
@@ -298,8 +369,11 @@ export class Recorder implements vscode.Disposable {
       const base = path.basename(saveUri.fsPath, path.extname(saveUri.fsPath));
       savedAudioFileName = `${base}${ext}`;
       const audioPath = path.join(path.dirname(saveUri.fsPath), savedAudioFileName);
-      fs.writeFileSync(audioPath, audioBuffer);
-      this.log.appendLine(`[audio] saved=${audioPath} bytes=${audioBuffer.length}`);
+      const normalizedAudio = normalizeRecordedAudio(audioBuffer);
+      fs.writeFileSync(audioPath, normalizedAudio.buffer);
+      this.log.appendLine(
+        `[audio] saved=${audioPath} bytes=${normalizedAudio.buffer.length} gain=${normalizedAudio.gainApplied.toFixed(2)}x`,
+      );
     } else {
       this.log.appendLine('[audio] no audio track captured');
     }
