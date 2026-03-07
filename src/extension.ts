@@ -68,6 +68,10 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.registerCommand('codescrim.enterEditMode', () => {
         player?.enterEditMode();
       }),
+
+      vscode.commands.registerCommand('codescrim.openReplayShell', () => {
+        player?.openReplayShell();
+      }),
     );
 
     // ── global status bar items ────────────────────────────────────────────────

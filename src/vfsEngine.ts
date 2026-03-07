@@ -284,10 +284,6 @@ export class VfsEngine {
     onChapter?: (title: string, ts: number) => void,
   ): Promise<number> {
     let lastIndex = fromIndex;
-    const touchedFiles = new Set<string>();
-    const deletedFiles = new Set<string>();
-    let activeFile = this._activeFile;
-    let selections: vscode.Selection[] = [];
 
     this._depth++;
     try {
@@ -309,119 +305,12 @@ export class VfsEngine {
             continue;
           }
 
-          if (ev.type === 'openFile') {
-            activeFile = ev.file;
-            selections = [];
-          } else if (ev.type === 'edit') {
-            if (typeof this._snapshot[ev.file] === 'string') {
-              this._snapshot[ev.file] = applyChanges(this._snapshot[ev.file], ev.changes);
-            } else {
-              this._snapshot[ev.file] = applyChanges('', ev.changes);
-              addParentDirectories(ev.file, this._directories);
-            }
-            touchedFiles.add(ev.file);
-            deletedFiles.delete(ev.file);
-          } else if (ev.type === 'createFile') {
-            this._snapshot[ev.file] = ev.content;
-            addParentDirectories(ev.file, this._directories);
-            touchedFiles.add(ev.file);
-            deletedFiles.delete(ev.file);
-          } else if (ev.type === 'deleteFile') {
-            delete this._snapshot[ev.file];
-            deletedFiles.add(ev.file);
-            touchedFiles.delete(ev.file);
-            if (activeFile === ev.file) {
-              activeFile = null;
-              selections = [];
-            }
-          } else if (ev.type === 'createDirectory') {
-            addDirectoryChain(ev.path, this._directories);
-          } else if (ev.type === 'deleteDirectory') {
-            deleteDirectoryTree(ev.path, this._snapshot, this._directories);
-            for (const rel of [...touchedFiles]) {
-              if (rel.startsWith(`${ev.path}/`)) {
-                touchedFiles.delete(rel);
-              }
-            }
-            for (const rel of Object.keys(this._snapshot)) {
-              if (rel.startsWith(`${ev.path}/`)) {
-                deletedFiles.add(rel);
-              }
-            }
-            if (activeFile && (activeFile === ev.path || activeFile.startsWith(`${ev.path}/`))) {
-              activeFile = null;
-              selections = [];
-            }
-            try { fs.rmSync(path.join(tempDir, ev.path), { recursive: true, force: true }); } catch { /* ignore */ }
-          } else if (ev.type === 'snapshot') {
-            for (const [rel, content] of Object.entries(ev.files)) {
-              this._snapshot[rel] = content;
-              addParentDirectories(rel, this._directories);
-              touchedFiles.add(rel);
-              deletedFiles.delete(rel);
-            }
-            if (ev.activeFile) {
-              activeFile = ev.activeFile;
-            }
-            if (ev.selections && ev.selections.length > 0) {
-              selections = ev.selections.map(toSelection);
-            }
-          } else if (ev.type === 'selection') {
-            activeFile = ev.file;
-            selections = ev.selections.map(toSelection);
-          } else if (ev.type === 'chapter') {
-            onChapter?.(ev.title, ev.timestamp);
-          }
+          await this.applyEvent(ev, tempDir, onChapter);
         } catch (err) {
           console.error(`CodeScrim VfsEngine: event[${i}] failed`, err);
         }
         lastIndex = i;
       }
-
-      for (const dir of [...this._directories].sort((a, b) => a.length - b.length)) {
-        const fullPath = path.join(tempDir, dir);
-        if (!fs.existsSync(fullPath)) {
-          fs.mkdirSync(fullPath, { recursive: true });
-        }
-      }
-
-      for (const rel of deletedFiles) {
-        const fullPath = path.join(tempDir, rel);
-        try { fs.rmSync(fullPath, { force: true }); } catch { /* ignore */ }
-      }
-
-      const wsEdit = new vscode.WorkspaceEdit();
-      for (const rel of touchedFiles) {
-        const content = this._snapshot[rel];
-        if (typeof content !== 'string') {
-          continue;
-        }
-        const fullPath = path.join(tempDir, rel);
-        const parentDir = path.dirname(fullPath);
-        if (!fs.existsSync(parentDir)) {
-          fs.mkdirSync(parentDir, { recursive: true });
-        }
-        const openDoc = vscode.workspace.textDocuments.find(
-          (d) => norm(d.uri.fsPath) === norm(fullPath),
-        );
-        if (openDoc) {
-          if (openDoc.getText() !== content) {
-            wsEdit.replace(openDoc.uri, new vscode.Range(0, 0, openDoc.lineCount, 0), content);
-          }
-        }
-        this.writeFileToDisk(fullPath, content);
-      }
-
-      await vscode.workspace.applyEdit(wsEdit);
-
-      if (activeFile) {
-        const editor = await this.revealFile(tempDir, activeFile);
-        if (editor && selections.length > 0) {
-          editor.selections = selections;
-        }
-      }
-
-      this._activeFile = activeFile;
     } finally {
       this._depth--;
     }

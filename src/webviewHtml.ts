@@ -418,12 +418,12 @@ function startSyncLoop() {
     syncInterval = setInterval(() => {
       if (vid) {
         updateLocalTransport(vid.currentTime, vid.duration);
-        if (!isEditMode && (lastLocalSyncSentAt < 0 || Math.abs(vid.currentTime - lastLocalSyncSentAt) >= 0.2)) {
+        if (!isEditMode && (lastLocalSyncSentAt < 0 || Math.abs(vid.currentTime - lastLocalSyncSentAt) >= 0.05)) {
           lastLocalSyncSentAt = vid.currentTime;
           sendTime(vid.currentTime);
         }
       }
-    }, 150);
+    }, 75);
   }
 }
 

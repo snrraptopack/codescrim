@@ -14,6 +14,7 @@ export class Player implements vscode.Disposable {
   private readonly transportToggleStatusBar: vscode.StatusBarItem;
   private readonly transportRestartStatusBar: vscode.StatusBarItem;
   private readonly transportEditStatusBar: vscode.StatusBarItem;
+  private readonly transportShellStatusBar: vscode.StatusBarItem;
 
   //  sub-modules 
   private readonly vfs    = new VfsEngine();
@@ -22,6 +23,8 @@ export class Player implements vscode.Disposable {
 
   //  webview 
   private panel: vscode.WebviewPanel | undefined;
+  private replayTerminal: vscode.Terminal | undefined;
+  private replayTerminalRoot: string | undefined;
 
   //  session state 
   private state: PlayerState | undefined;
@@ -61,11 +64,19 @@ export class Player implements vscode.Disposable {
     this.transportEditStatusBar.name = 'CodeScrim Enter Edit Mode';
     this.transportEditStatusBar.command = 'codescrim.enterEditMode';
     this.transportEditStatusBar.hide();
+    this.transportShellStatusBar = vscode.window.createStatusBarItem(
+      vscode.StatusBarAlignment.Right,
+      999,
+    );
+    this.transportShellStatusBar.name = 'CodeScrim Replay Shell';
+    this.transportShellStatusBar.command = 'codescrim.openReplayShell';
+    this.transportShellStatusBar.hide();
     this.disposables.push(
       this.playbackStatusBar,
       this.transportToggleStatusBar,
       this.transportRestartStatusBar,
       this.transportEditStatusBar,
+      this.transportShellStatusBar,
       vscode.workspace.onDidChangeTextDocument(e => this.onUserEdit(e)),
       vscode.window.onDidChangeActiveTextEditor(e => this.onActiveEditorChange(e)),
       vscode.window.onDidChangeTextEditorSelection(e => this.onEditorClick(e)),
@@ -118,6 +129,26 @@ export class Player implements vscode.Disposable {
     if (!this.state || !this.panel) { return; }
     this.panel.reveal(undefined, false);
     this.postToWebview({ type: 'transportControl', action: 'requestEditMode' });
+  }
+
+  openReplayShell(): void {
+    if (!this.state || !this.tempDir) {
+      void vscode.window.showInformationMessage('CodeScrim: Start a replay first to open the replay shell.');
+      return;
+    }
+
+    if (!this.replayTerminal || this.replayTerminal.exitStatus || this.replayTerminalRoot !== this.tempDir) {
+      this.replayTerminal?.dispose();
+      this.replayTerminal = vscode.window.createTerminal({
+        name: 'CodeScrim Replay Shell',
+        cwd: vscode.Uri.file(this.tempDir),
+        location: vscode.TerminalLocation.Panel,
+      });
+      this.replayTerminalRoot = this.tempDir;
+      this.replayTerminal.sendText(this.buildReplayShellBanner(this.tempDir), true);
+    }
+
+    this.replayTerminal.show(true);
   }
 
   //  core playback 
@@ -465,6 +496,10 @@ export class Player implements vscode.Disposable {
       this.transportEditStatusBar.show();
     }
 
+    this.transportShellStatusBar.text = '$(terminal)';
+    this.transportShellStatusBar.tooltip = 'Open a shell rooted at the current CodeScrim replay workspace';
+    this.transportShellStatusBar.show();
+
     void this.updatePlaybackContexts();
   }
 
@@ -519,11 +554,19 @@ export class Player implements vscode.Disposable {
     }
   }
 
+  private buildReplayShellBanner(root: string): string {
+    const banner = `[CodeScrim] Replay shell rooted at ${root}`.replace(/"/g, '\\"');
+    return `echo "${banner}"`;
+  }
+
   private cleanup(): void {
     for (const timer of this.pendingSaves.values()) {
       clearTimeout(timer);
     }
     this.pendingSaves.clear();
+    this.replayTerminal?.dispose();
+    this.replayTerminal = undefined;
+    this.replayTerminalRoot = undefined;
     this.terms.reset();
     this.vfs.reset();
     this.queue.clear();
@@ -536,6 +579,7 @@ export class Player implements vscode.Disposable {
     this.transportToggleStatusBar.hide();
     this.transportRestartStatusBar.hide();
     this.transportEditStatusBar.hide();
+    this.transportShellStatusBar.hide();
     void this.updatePlaybackContexts();
   }
 
