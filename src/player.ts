@@ -26,6 +26,7 @@ export class Player implements vscode.Disposable {
   //  session state 
   private state: PlayerState | undefined;
   private tempDir: string | undefined;
+  private pendingSaves = new Map<string, ReturnType<typeof setTimeout>>();
 
   //  vs code listeners 
   private disposables: vscode.Disposable[] = [];
@@ -228,6 +229,7 @@ export class Player implements vscode.Disposable {
         this.state.isEditMode = true;
         this.state.currentTime = msg.time;
         this.postToWebview({ type: 'setEditMode', active: true });
+        this.flushDirtyTutorialEditors();
         this.updatePlaybackStatusBar('edit');
         vscode.window.setStatusBarMessage(
           '$(pencil) CodeScrim: Paused  edit mode active. The code is yours!', 6000,
@@ -263,6 +265,7 @@ export class Player implements vscode.Disposable {
         this.state.isEditMode = true;
         this.state.currentTime = msg.time;
         this.postToWebview({ type: 'setEditMode', active: true });
+        this.flushDirtyTutorialEditors();
         this.updatePlaybackStatusBar('edit');
         await this.ensureEditorFocus();
         break;
@@ -327,9 +330,16 @@ export class Player implements vscode.Disposable {
   /** User typed while video was playing  pause immediately. */
   private onUserEdit(e: vscode.TextDocumentChangeEvent): void {
     if (this.vfs.isUpdating) { return; }
-    if (!this.state?.isPlaying || !this.tempDir) { return; }
+    if (!this.state || !this.tempDir) { return; }
     if (e.contentChanges.length === 0) { return; }
-    if (!e.document.uri.fsPath.toLowerCase().startsWith(path.normalize(this.tempDir).toLowerCase())) { return; }
+    if (!this.isTutorialDocument(e.document)) { return; }
+
+    if (this.state.isEditMode) {
+      this.scheduleTutorialSave(e.document);
+      return;
+    }
+
+    if (!this.state.isPlaying) { return; }
     this.postToWebview({ type: 'forcePause' });
   }
 
@@ -470,7 +480,50 @@ export class Player implements vscode.Disposable {
     this.panel?.webview.postMessage(msg);
   }
 
+  private isTutorialDocument(document: vscode.TextDocument): boolean {
+    return Boolean(
+      this.tempDir &&
+      document.uri.scheme === 'file' &&
+      document.uri.fsPath.toLowerCase().startsWith(path.normalize(this.tempDir).toLowerCase()),
+    );
+  }
+
+  private scheduleTutorialSave(document: vscode.TextDocument): void {
+    if (!this.state?.isEditMode || !this.isTutorialDocument(document) || document.isUntitled) {
+      return;
+    }
+
+    const key = normPath(document.uri.fsPath);
+    const existing = this.pendingSaves.get(key);
+    if (existing) {
+      clearTimeout(existing);
+    }
+
+    const timer = setTimeout(() => {
+      this.pendingSaves.delete(key);
+      if (!this.state?.isEditMode || document.isClosed || !document.isDirty) {
+        return;
+      }
+      void document.save();
+    }, 180);
+
+    this.pendingSaves.set(key, timer);
+  }
+
+  private flushDirtyTutorialEditors(): void {
+    for (const document of vscode.workspace.textDocuments) {
+      if (!this.isTutorialDocument(document) || document.isUntitled || !document.isDirty) {
+        continue;
+      }
+      this.scheduleTutorialSave(document);
+    }
+  }
+
   private cleanup(): void {
+    for (const timer of this.pendingSaves.values()) {
+      clearTimeout(timer);
+    }
+    this.pendingSaves.clear();
     this.terms.reset();
     this.vfs.reset();
     this.queue.clear();
@@ -492,4 +545,8 @@ export class Player implements vscode.Disposable {
     this.terms.dispose();
     this.disposables.forEach(d => d.dispose());
   }
+}
+
+function normPath(filePath: string): string {
+  return path.normalize(filePath).toLowerCase();
 }

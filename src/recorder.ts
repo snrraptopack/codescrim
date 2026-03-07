@@ -61,6 +61,9 @@ export class Recorder implements vscode.Disposable {
   private audioLevel = 0;
   private hasAudio = false;
   private recordingTerminal: vscode.Terminal | undefined;
+  private lastOpenedFile: string | undefined;
+  private lastSelectionKey: string | undefined;
+  private lastSelectionAt = 0;
 
   // ── ui ───────────────────────────────────────────────────────────────────
   private statusBar: vscode.StatusBarItem;
@@ -141,6 +144,9 @@ export class Recorder implements vscode.Disposable {
     this._knownDirectories = new Set<string>();
     this.audioLevel = 0;
     this.hasAudio = false;
+    this.lastOpenedFile = undefined;
+    this.lastSelectionKey = undefined;
+    this.lastSelectionAt = 0;
 
     if (shouldRecordAudio) {
       this.statusBar.text = '$(loading~spin) CodeScrim: starting recorder…';
@@ -455,6 +461,8 @@ export class Recorder implements vscode.Disposable {
       if (!this._recording || !e || e.document.uri.scheme !== 'file') { return; }
       const rel = relPath(e.document.uri.fsPath);
       if (!rel) { return; }
+      if (this.lastOpenedFile === rel) { return; }
+      this.lastOpenedFile = rel;
       this._events.push({ type: 'openFile', timestamp: this.ts(), file: rel });
     } catch (err) {
       console.error('[CodeScrim] handleEditorSwitch error:', err);
@@ -464,13 +472,22 @@ export class Recorder implements vscode.Disposable {
   private handleSelection(e: vscode.TextEditorSelectionChangeEvent): void {
     try {
       if (!this._recording || e.textEditor.document.uri.scheme !== 'file') { return; }
+      if (e.kind === vscode.TextEditorSelectionChangeKind.Command) { return; }
       const rel = relPath(e.textEditor.document.uri.fsPath);
       if (!rel) { return; }
+      const serialisedSelections = e.selections.map(s => serSel(s));
+      const key = `${rel}:${JSON.stringify(serialisedSelections)}`;
+      const now = Date.now();
+      if (key === this.lastSelectionKey && now - this.lastSelectionAt < 400) { return; }
+      if (now - this.lastSelectionAt < 120) { return; }
+
+      this.lastSelectionKey = key;
+      this.lastSelectionAt = now;
       this._events.push({
         type: 'selection',
         timestamp: this.ts(),
         file: rel,
-        selections: e.selections.map(s => serSel(s)),
+        selections: serialisedSelections,
       });
     } catch (err) {
       console.error('[CodeScrim] handleSelection error:', err);
